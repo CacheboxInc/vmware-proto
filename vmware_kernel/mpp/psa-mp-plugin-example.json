@@ -1,0 +1,18 @@
+{
+   "operations" :
+   {
+      "start" :
+      [
+         /* Register plugin */
+         "storage core plugin registration add -m mp-plugin-example -N MP -P MP_PLUGIN_EXAMPLE",
+      ]
+   }
+   ,
+   "metadata" :
+   {
+      "version"  : 1,
+      "requires" : ["vmkeventd", "vmkernel vmkapi compatibility"],
+      "provides" : ["PSA MP Plugin registration", "PSA MP plugin example registration"]
+   }
+}
+

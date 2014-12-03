@@ -1,0 +1,16 @@
+<metaList>
+  <metadata>
+    <productId>esx</productId>
+    <version>5.5.0</version>
+    <locale></locale>
+    <url>metadata.zip</url>
+    <channelName>default</channelName>
+  </metadata>
+  <metadata>
+    <productId>embeddedEsx</productId>
+    <version>5.5.0</version>
+    <locale></locale>
+    <url>metadata.zip</url>
+    <channelName>default</channelName>
+  </metadata>
+</metaList>

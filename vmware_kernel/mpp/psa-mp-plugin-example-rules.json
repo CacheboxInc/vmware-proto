@@ -1,0 +1,18 @@
+{
+   "operations" :
+   {
+      "start" :
+      [
+         /* Add claim rules */
+         "storage core claimrule add --claimrule-class=MP --autoassign --plugin MP_PLUGIN_EXAMPLE --type vendor --vendor * --model *",
+      ]
+   }
+   ,
+   "metadata" :
+   {
+      "version"  : 1,
+      "requires" : ["PSA MP plugin example registration"],
+      "provides" : ["PSA MP claim rules", "storage i/o multipathing"]
+   }
+}
+
