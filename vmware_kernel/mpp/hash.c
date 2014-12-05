@@ -1,29 +1,39 @@
-
-#ifndef __VMKERNEL__
-#include <assert.h>
-#include <stdlib.h>
-#include <string.h>
-#else
 #include "vmware_include.h"
-#endif
 #include "hash.h"
 
-
-int hash_init(hash_table_t *hash, int no_buckets, cmp_fn_t fun)
+int hash_init(hash_table_t *hash, const char *name, vmk_ModuleID module_id, int no_buckets, cmp_fn_t fun)
 {
-	int i;
+	int   i;
 	dll_t *t;
+	int   rc;
+	vmk_HeapCreateProps props;
+
 	assert(hash != NULL);
 	assert(fun != NULL);
 	assert(no_buckets > 0);
 
 	memset(hash, 0, sizeof(*hash));
 
-	hash->cmp		= fun;
-	hash->no_buckets	= no_buckets;
-	hash->count		= 0;
-	hash->buckets		= calloc(no_buckets, sizeof(*hash->buckets));
+	props.type              = VMK_HEAP_TYPE_SIMPLE;
+	props.module            = module_id;
+	props.initial           = no_buckets * sizeof(*hash->buckets);
+	props.max               = props.initial;
+	props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
+	rc                      = vmk_NameInitialize(&props.name, name);
+	VMK_ASSERT(rc == VMK_OK);
+
+	rc  = vmk_HeapCreate(&props, &hash->heap_id);
+	if (rc != VMK_OK) {
+		vmk_WarningMessage("HeapCreate failed for alignedHeap");
+		return -1;
+	}
+
+	hash->cmp        = fun;
+	hash->no_buckets = no_buckets;
+	hash->count      = 0;
+	hash->buckets    = calloc(hash->heap_id, no_buckets, sizeof(*hash->buckets));
 	if (hash->buckets == NULL) {
+		vmk_HeapDestroy(hash->heap_id);
 		return (-1);
 	}
 
@@ -40,7 +50,8 @@ void hash_deinit(hash_table_t *hash)
 	assert(hash->no_buckets > 0);
 	assert(hash->count == 0);
 
-	free(hash->buckets);
+	free(hash->heap_id, hash->buckets);
+	vmk_HeapDestroy(hash->heap_id);
 }
 
 void hash_cleanup(hash_table_t *hash, cleanup_fn_t cb)

@@ -3,16 +3,7 @@
  *
  * queue.c
  */
-#ifndef __VMKERNEL__
-#include <assert.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <string.h>
-#include <stdio.h>
-#else
 #include "vmware_include.h"
-#endif
-
 #include "queue.h"
 
  /*
