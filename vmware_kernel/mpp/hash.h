@@ -1,7 +1,6 @@
 #if !defined(__HASH_H__)
 #define __HASH_H__
 
-#include <assert.h>
 #include <stddef.h>
 #include "dll.h"
 

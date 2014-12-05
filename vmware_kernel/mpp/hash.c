@@ -1,7 +1,13 @@
+
+#ifndef __VMKERNEL__
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#else
+#include "vmware_include.h"
+#endif
 #include "hash.h"
+
 
 int hash_init(hash_table_t *hash, int no_buckets, cmp_fn_t fun)
 {
