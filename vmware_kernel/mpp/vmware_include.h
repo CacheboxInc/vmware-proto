@@ -97,4 +97,15 @@ static inline int pthread_mutex_destroy(vmk_Lock lock)
 	return 0;
 }
 
+static inline int pthread_create()
+{
+
+}
+
+static inline int pthread_join(vmk_WorldID wid, void *unused)
+{
+	vmk_WorldWaitForDeath(wid);
+	return 0;
+}
+
 #endif // __VMWARE_INCLUDE__
