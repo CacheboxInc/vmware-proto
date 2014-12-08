@@ -7,10 +7,17 @@ int hash_init(hash_table_t *hash, const char *name, vmk_ModuleID module_id, int 
 	dll_t *t;
 	int   rc;
 	vmk_HeapCreateProps props;
+	char n[128];
 
 	assert(hash != NULL);
 	assert(fun != NULL);
 	assert(no_buckets > 0);
+
+	rc = vmware_name(n, name, "hash", sizeof(n));
+	if (rc < 0) {
+		vmk_WarningMessage("%s: could not initialize name.\n", __func__);
+		return -1;
+	}
 
 	memset(hash, 0, sizeof(*hash));
 
@@ -19,7 +26,7 @@ int hash_init(hash_table_t *hash, const char *name, vmk_ModuleID module_id, int 
 	props.initial           = no_buckets * sizeof(*hash->buckets);
 	props.max               = props.initial;
 	props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
-	rc                      = vmk_NameInitialize(&props.name, name);
+	rc                      = vmk_NameInitialize(&props.name, n);
 	VMK_ASSERT(rc == VMK_OK);
 
 	rc  = vmk_HeapCreate(&props, &hash->heap_id);
