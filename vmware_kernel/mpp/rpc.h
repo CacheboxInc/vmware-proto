@@ -1,8 +1,9 @@
 #ifndef __RPC_H__
 #define __RPC_H__
 
-#include <stdint.h>
-#include <inttypes.h>
+#include "vmkapi.h"
+#include "vmware_include.h"
+#include <stddef.h>
 #include "bufpool.h"
 #include "hash.h"
 #include "bufpool.h"
@@ -16,13 +17,13 @@ typedef void (*rpchandler_t)(struct rpc_msg *);
 
 #define RPC_CHAN_LOCK(rcp) do {                 \
 	int _rc;                                \
-	_rc = pthread_mutex_lock(&rcp->lock);   \
+	_rc = pthread_mutex_lock(rcp->lock);    \
 	assert(_rc == 0);                       \
 } while(0)
 
 #define RPC_CHAN_UNLOCK(rcp) do {               \
 	int _rc;                                \
-	_rc = pthread_mutex_unlock(&rcp->lock); \
+	_rc = pthread_mutex_unlock(rcp->lock);  \
 	assert(_rc == 0);                       \
 } while (0)
 
@@ -83,8 +84,9 @@ typedef struct rpc_msg {
 
 rpc_chan_t * rpc_chan_new(void);
 void rpc_chan_free(rpc_chan_t *rcp);
-int rpc_chan_init(rpc_chan_t *, sock_handle_t, size_t nway, int reserve,
-	size_t msgsz, size_t hashsz, rpchandler_t req_h, rpchandler_t resp_h);
+int rpc_chan_init(rpc_chan_t *, module_global_t *module, sock_handle_t,
+		size_t nway, int reserve, size_t msgsz, size_t hashsz,
+		rpchandler_t req_h, rpchandler_t resp_h);
 void rpc_chan_deinit(rpc_chan_t *rcp);
 void rpc_chan_close(rpc_chan_t *rcp);
 
