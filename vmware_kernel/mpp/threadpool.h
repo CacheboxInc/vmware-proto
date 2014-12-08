@@ -1,7 +1,7 @@
 #ifndef __THREAD_POOL_H__
 #define __THREAD_POOL_H__
 
-#include <pthread.h>
+#include "vmware_include.h"
 #include "dll.h"
 #include "bufpool.h"
 
