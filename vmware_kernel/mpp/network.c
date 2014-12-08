@@ -98,7 +98,7 @@ static sock_handle_t socket(int domain, int type, int protocol)
 
 	rc = vmk_SocketCreate(domain, type, protocol, &vs->sock);
 	if (rc != VMK_OK) {
-		vmware_socket_free(&vs);
+		vmware_socket_free(vs);
 		return -1;
 	}
 
