@@ -104,14 +104,33 @@ static inline int pthread_mutex_destroy(vmk_Lock lock)
 	return 0;
 }
 
-static inline int pthread_create()
+static inline int pthread_create(vmk_WorldID *world_id, const char *name,
+		vmk_WorldStartFunc t_func, void *data,  module_global_t *module)
 {
+	VMK_ReturnStatus status = VMK_FAILURE;
+	vmk_WorldProps props;
 
+	/* Create the world */
+	props.name          = name;
+	props.moduleID      = module->mod_id;
+	props.startFunction = t_func;
+	props.data          = data;
+	props.schedClass    = VMK_WORLD_SCHED_CLASS_DEFAULT;
+	status              = vmk_WorldCreate(&props, world_id);
+
+	if (status == VMK_OK) {
+		vmk_WarningMessage("start_send_msg world created succeed\n");
+		return 0;
+	} else {
+		vmk_WarningMessage("start_send_msg world created failed\n");
+		return -1;
+	}
 }
 
 static inline int pthread_join(vmk_WorldID wid, void *unused)
 {
 	vmk_WorldWaitForDeath(wid);
+	vmk_WorldDestroy(wid);
 	return 0;
 }
 

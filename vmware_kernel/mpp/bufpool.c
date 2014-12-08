@@ -93,7 +93,7 @@ void bufpool_deinit(bufpool_t *bp)
 
 	while (bp->issued != 0) {
 		/* block deinit until last buffer is freed */
-		vmk_WorkWait((vmk_WorldEventID) &bp->issued, bp->lock,
+		vmk_WorldWait((vmk_WorldEventID) &bp->issued, bp->lock,
 			100 * VMK_MSEC_PER_SEC, "bufpool_deinit: blocked.\n");
 	}
 	assert(bp->issued == 0);
@@ -162,7 +162,7 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 		}
 
 		while (bp->issued >= bp->nmax) {
-			vmk_WorkWait((vmk_WorldEventID) &bp->issued, bp->lock,
+			vmk_WorldWait((vmk_WorldEventID) &bp->issued, bp->lock,
 				30 * VMK_MSEC_PER_SEC, "bufpool_get: blocked.\n");
 		}
 	}

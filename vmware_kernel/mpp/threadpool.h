@@ -13,6 +13,7 @@ typedef enum {
 
 typedef struct thread_pool {
 	pthread_t       *threads;
+	vmk_HeapID	heap_id;
 	int             active;
 
 	pthread_mutex_t work_lock;
@@ -31,7 +32,9 @@ typedef struct work {
 	void  (*work_fn)(struct work *, void *data);
 } work_t;
 
-int thread_pool_init(thread_pool_t *tp, int nthreads);
+
+int thread_pool_init(thread_pool_t *tp, const char *name,
+		module_global_t *module, int nthreads);
 void thread_pool_deinit(thread_pool_t *tp);
 
 work_t *new_work(thread_pool_t *tp);

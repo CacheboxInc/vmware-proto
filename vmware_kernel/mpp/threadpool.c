@@ -1,11 +1,8 @@
-#include <pthread.h>
-#include <string.h>
-#include <stdlib.h>
-#include <assert.h>
+#include "vmware_include.h"
 
 #include "threadpool.h"
 
-void *_worker_thread(void *args)
+VMK_ReturnStatus _worker_thread(void *args)
 {
 	thread_pool_t *tp = args;
 	int           rc;
@@ -13,7 +10,7 @@ void *_worker_thread(void *args)
 	work_t        *w;
 
 	while (1) {
-		rc = pthread_mutex_lock(&tp->work_lock);
+		rc = pthread_mutex_lock(tp->work_lock);
 		assert(rc == 0);
 
 		if (DLL_ISEMPTY(&tp->work_list)) {
@@ -22,14 +19,17 @@ void *_worker_thread(void *args)
 				break;
 			}
 
-			rc = pthread_cond_wait(&tp->work_cond, &tp->work_lock);
-			assert(rc == 0);
+			rc = vmk_WorldWait((vmk_WorldEventID) &tp->work_pend,
+					tp->work_lock, VMK_TIMEOUT_UNLIMITED_MS,
+					"_worker_thread blocked.\n");
+
+			assert(rc == VMK_OK);
 
 			if (DLL_ISEMPTY(&tp->work_list)) {
 				if (tp->state == TP_SHUTTING) {
 					break;
 				}
-				pthread_mutex_unlock(&tp->work_lock);
+				pthread_mutex_unlock(tp->work_lock);
 				continue;
 			}
 		}
@@ -38,7 +38,7 @@ void *_worker_thread(void *args)
 		assert(!DLL_ISEMPTY(&tp->work_list));
 		f = DLL_NEXT(&tp->work_list);
 		DLL_REM(f);
-		pthread_mutex_unlock(&tp->work_lock);
+		pthread_mutex_unlock(tp->work_lock);
 
 		/* work on it */
 		w = container_of(f, work_t, list);
@@ -49,8 +49,8 @@ void *_worker_thread(void *args)
 	}
 
 	tp->active--;
-	pthread_mutex_unlock(&tp->work_lock);
-	return NULL;
+	pthread_mutex_unlock(tp->work_lock);
+	return VMK_OK;
 }
 
 void _thread_pool_deinit(thread_pool_t *tp)
@@ -60,15 +60,15 @@ void _thread_pool_deinit(thread_pool_t *tp)
 	pthread_t *h;
 
 	if (tp->threads != NULL) {
-		rc = pthread_mutex_lock(&tp->work_lock);
+		rc = pthread_mutex_lock(tp->work_lock);
 		assert(rc == 0);
 
 		tp->state = TP_SHUTTING;
 
-		rc = pthread_cond_broadcast(&tp->work_cond);
-		assert(rc == 0);
+		rc = vmk_WorldWakeup((vmk_WorldEventID) &tp->work_pend);
+		assert(rc == VMK_OK);
 
-		rc = pthread_mutex_unlock(&tp->work_lock);
+		rc = pthread_mutex_unlock(tp->work_lock);
 		assert(rc == 0);
 
 		for (i = 0; i < tp->nthreads; i++) {
@@ -79,51 +79,66 @@ void _thread_pool_deinit(thread_pool_t *tp)
 
 			(void) pthread_join(*h, NULL);
 		}
-		free(tp->threads);
+		free(tp->heap_id, tp->threads);
 	}
 
 	assert(tp->active == 0);
 	assert(DLL_ISEMPTY(&tp->work_list));
 
-	pthread_mutex_destroy(&tp->work_lock);
-	pthread_cond_destroy(&tp->work_cond);
+	pthread_mutex_destroy(tp->work_lock);
 
 	bufpool_deinit(&tp->pool);
+	vmk_HeapDestroy(tp->heap_id);
 	memset(tp, 0, sizeof(*tp));
 }
 
-int thread_pool_init(thread_pool_t *tp, int nthreads)
+int thread_pool_init(thread_pool_t *tp, const char *name,
+		module_global_t *module, int nthreads)
 {
-	int       i;
-	int       rc;
-	int       nwork;
-	int       nwork_max;
-	pthread_t *h;
+	int  i;
+	int  rc;
+	int  nwork;
+	int  nwork_max;
+	char n[128];
+	char n1[128];
+
+	vmk_HeapCreateProps props;
+	pthread_t           *h;
 
 	memset(tp, 0, sizeof(*tp));
+
+	rc = vmware_name(n, name, "threadpool", sizeof(n));
+	assert(rc == 0);
+
+	props.type              = VMK_HEAP_TYPE_SIMPLE;
+	props.module            = module->mod_id;
+	props.initial           = nthreads * sizeof(*tp->threads);
+	props.max               = props.initial;
+	props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
+	rc                      = vmk_NameInitialize(&props.name, n);
+	VMK_ASSERT(rc == VMK_OK);
+
+	rc  = vmk_HeapCreate(&props, &tp->heap_id);
+	if (rc != VMK_OK) {
+		return -1;
+	}
 
 	nwork     = nthreads;
 	nwork_max = nthreads * 4;
 
-	rc = bufpool_init(&tp->pool, "thread-pool", sizeof(struct work), nwork,
+	rc = bufpool_init(&tp->pool, n, module, sizeof(struct work), nwork,
 			nwork_max);
 	if (rc < 0) {
 		goto error;
 	}
 
 	/* init locks */
-	rc = pthread_mutex_init(&tp->work_lock, NULL);
+	rc = pthread_mutex_init(tp->work_lock, n, module);
 	if (rc < 0) {
 		goto error;
 	}
 
-	/* init conditional vars */
-	rc = pthread_cond_init(&tp->work_cond, NULL);
-	if (rc < 0) {
-		goto error;
-	}
-
-	tp->threads = calloc(nthreads, sizeof(*tp->threads));
+	tp->threads = calloc(tp->heap_id, nthreads, sizeof(*tp->threads));
 	if (tp->threads == NULL) {
 		goto error;
 	}
@@ -131,8 +146,13 @@ int thread_pool_init(thread_pool_t *tp, int nthreads)
 	DLL_INIT(&tp->work_list);
 
 	for (i = 0; i < nthreads; i++) {
-		h = &tp->threads[i];
-		rc = pthread_create(h, NULL, _worker_thread, tp);
+		h  = &tp->threads[i];
+		rc = vmk_StringFormat(n1, sizeof(n1), NULL, "%s-%d", n, i);
+		if (rc != VMK_OK) {
+			goto error;
+		}
+
+		rc = pthread_create(h, n1, _worker_thread, tp, module);
 		if (rc < 0) {
 			goto error;
 		}
@@ -171,23 +191,14 @@ work_t *new_work(thread_pool_t *tp)
 	return w;
 }
 
-void free_work(thread_pool_t *tp, work_t *w)
-{
-	pthread_mutex_lock(&tp->work_lock);
-	DLL_REM(&w->list);
-	pthread_mutex_unlock(&tp->work_lock);
-
-	bufpool_put(&tp->pool, (char *) w);
-}
-
 int schedule_work(thread_pool_t *tp, work_t *w)
 {
 	assert(tp->state == TP_INITIALIZED);
 
-	pthread_mutex_lock(&tp->work_lock);
+	pthread_mutex_lock(tp->work_lock);
 	DLL_REVADD(&tp->work_list, &w->list);
-	pthread_cond_signal(&tp->work_cond);
-	pthread_mutex_unlock(&tp->work_lock);
+	vmk_WorldWakeup((vmk_WorldEventID) &tp->work_pend);
+	pthread_mutex_unlock(tp->work_lock);
 
 	return 0;
 }
