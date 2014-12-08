@@ -1,9 +1,5 @@
-#include <assert.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
+#include "vmkapi.h"
+#include "vmware_include.h"
 #include "bufpool.h"
 
 /*
@@ -14,21 +10,39 @@
  * Returns number of buffers allocated.
  */
 
-int bufpool_init_reserve(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs,
-		int reserve, size_t nmax)
+int bufpool_init_reserve(bufpool_t *bp, const char *name,
+	module_global_t *module, size_t bufsize, size_t nbufs, int reserve,
+	size_t nmax)
 {
-	char  *n;
-	int   rc;
-	dll_t *buf;
-
-	n = strdup(name);
-	assert(n != NULL);
+	char                    n[128];
+	vmk_HeapCreateProps     props;
+	VMK_ReturnStatus        rc;
+	int                     r;
+	dll_t                   *buf;
 
 	assert(bp);
 	assert(nbufs > 0 && nmax >= nbufs);
+
+	r = vmware_name(n, name, "bufpool", sizeof(n));
+	assert(r == 0);
+
 	if (bufsize < sizeof(dll_t)) {
 		bufsize = sizeof(dll_t);
 	}
+
+        props.type              = VMK_HEAP_TYPE_SIMPLE;
+        props.module            = module->mod_id;
+        props.initial           = bufsize * nbufs;
+        props.max               = bufsize * nmax;
+        props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
+        rc                      = vmk_NameInitialize(&props.name, n);
+        VMK_ASSERT(rc == VMK_OK);
+
+	rc  = vmk_HeapCreate(&props, &bp->heap_id);
+	if (rc != VMK_OK) {
+		return -1;
+	}
+
 	BZERO(bp);
 	queue_init(&bp->freelist);
 	bp->bufsize = bufsize;
@@ -36,16 +50,12 @@ int bufpool_init_reserve(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs
 	bp->nmax    = nmax;
 	bp->state   = INITIALIZED;
 	bp->reserve = reserve;
-	bp->name    = n;
 
-	rc = pthread_mutex_init(&bp->lock, NULL);
-	assert(rc == 0);
-
-	rc = pthread_cond_init(&bp->rendez, NULL);
-	assert(rc == 0);
+	r = pthread_mutex_init(bp->lock, n, module);
+	assert(r == 0);
 
 	for (bp->owned = 0; bp->owned < nbufs; bp->owned++) {
-		if ((buf = (dll_t *)malloc(bufsize)) == NULL) {
+		if ((buf = (dll_t *) malloc(bp->heap_id, bufsize)) == NULL) {
 			return bp->owned;
 		}
 		DLL_INIT(buf);
@@ -54,26 +64,27 @@ int bufpool_init_reserve(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs
 	return bp->owned;
 }
 
-int bufpool_init(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs, size_t nmax)
+int bufpool_init(bufpool_t *bp, const char *name, module_global_t *module,
+	size_t bufsize, size_t nbufs, size_t nmax)
 {
-	return bufpool_init_reserve(bp, name, bufsize, nbufs, 0, nmax);
+	return bufpool_init_reserve(bp, name, module, bufsize, nbufs, 0, nmax);
 }
 /*
  * free all buffers on the freelist.
  */
 void bufpool_deinit(bufpool_t *bp)
 {
-	int             rc;
-	struct timespec ts;
-	dll_t           *dllp;
+	int        rc;
+	dll_t      *dllp;
+	vmk_uint64 d = 1 * 1000 * 1000;
 
 	assert(bp != NULL);
 
-	rc = pthread_mutex_lock(&bp->lock);
+	rc = pthread_mutex_lock(bp->lock);
 	assert(rc == 0);
 
 	if (bp->state != INITIALIZED) {
-		rc = pthread_mutex_unlock(&bp->lock);
+		rc = pthread_mutex_unlock(bp->lock);
 		return;
 	}
 
@@ -82,27 +93,22 @@ void bufpool_deinit(bufpool_t *bp)
 
 	while (bp->issued != 0) {
 		/* block deinit until last buffer is freed */
-		ts.tv_sec  = 1;
-		ts.tv_nsec = 0;
-
-		rc = pthread_cond_timedwait(&bp->rendez, &bp->lock, &ts);
+		vmk_WorkWait((vmk_WorldEventID) &bp->issued, bp->lock,
+			100 * VMK_MSEC_PER_SEC, "bufpool_deinit: blocked.\n");
 	}
 	assert(bp->issued == 0);
 
 	while (queue_rem(&bp->freelist, &dllp) == 0) {
-		free(dllp);
+		free(bp->heap_id, dllp);
 		bp->owned--;
 	}
 	queue_deinit(&bp->freelist);
 
 	bp->state = DEINTED;
 
-	pthread_mutex_unlock(&bp->lock);
-
-	pthread_mutex_destroy(&bp->lock);
-	pthread_cond_destroy(&bp->rendez);
-
-	free(bp->name);
+	pthread_mutex_unlock(bp->lock);
+	pthread_mutex_destroy(bp->lock);
+	vmk_HeapDestroy(bp->heap_id);
 }
 
 /*
@@ -117,13 +123,15 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 	dll_t *dllp;
 	int   res;
 
-	rc = pthread_mutex_lock(&bp->lock);
+	rc = pthread_mutex_lock(bp->lock);
 	assert(rc == 0);
 
 	assert(bp && (bp->state == INITIALIZED) && bufp);
 	assert(!(alloc_reserve != 0 && bp->reserve == 0));
 
 	while(1) {
+		assert(bp->state == INITIALIZED);
+
 		if (queue_rem(&bp->freelist, &dllp) == 0) {
 			*bufp = (char *)dllp;
 			bp->issued++;
@@ -134,7 +142,7 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 		if ((bp->owned + bp->reserve < bp->nmax) ||
 				(alloc_reserve && (bp->reserve != 0) &&
 				 (bp->owned < bp->nmax))) {
-			if ((dllp = (dll_t *)calloc(1, bp->bufsize)) == NULL) {
+			if ((dllp = (dll_t *) calloc(bp->heap_id, 1, bp->bufsize)) == NULL) {
 				if (noblock) {
 					res = -1;
 					break;
@@ -152,10 +160,14 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 				break;
 			}
 		}
-		pthread_cond_wait(&bp->rendez, &bp->lock);
+
+		while (bp->issued >= bp->nmax) {
+			vmk_WorkWait((vmk_WorldEventID) &bp->issued, bp->lock,
+				30 * VMK_MSEC_PER_SEC, "bufpool_get: blocked.\n");
+		}
 	}
 
-	rc = pthread_mutex_unlock(&bp->lock);
+	rc = pthread_mutex_unlock(bp->lock);
 	assert(rc == 0);
 	return res;
 }
@@ -208,7 +220,7 @@ void bufpool_put(bufpool_t *bp, char *buf)
 
 	assert(bp && buf);
 
-	rc = pthread_mutex_lock(&bp->lock);
+	rc = pthread_mutex_lock(bp->lock);
 	assert(rc == 0);
 
 	bp->issued--;
@@ -217,7 +229,7 @@ void bufpool_put(bufpool_t *bp, char *buf)
 		DLL_INIT((dll_t*)buf);
 		queue_add(&bp->freelist, (dll_t *)buf);
 	} else {
-		free(buf);
+		free(bp->heap_id, buf);
 		buf=NULL;
 		bp->owned--;
 		assert(bp->owned >= 0);
@@ -227,9 +239,9 @@ void bufpool_put(bufpool_t *bp, char *buf)
 		assert(bp->owned >= bp->nbufs);
 	}
 
-	pthread_cond_broadcast(&bp->rendez);
+	vmk_WorldWakeup((vmk_WorldEventID) &bp->issued);
 
-	pthread_mutex_unlock(&bp->lock);
+	pthread_mutex_unlock(bp->lock);
 }
 
 #ifdef SOLOTEST_BUFPOOL

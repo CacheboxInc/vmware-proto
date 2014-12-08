@@ -1,9 +1,9 @@
 #ifndef BUFPOOL_H
 #define BUFPOOL_H
 
-#include <inttypes.h>
-#include <stdint.h>
-#include <pthread.h>
+#include <stddef.h>
+#include "vmware_include.h"
+#include "vmkapi.h"
 #include "dll.h"
 #include "queue.h"
 
@@ -22,29 +22,31 @@ typedef enum {
 } BUFPOOL_STATE;
 
 typedef struct bufpool {
-	char                    *name;
-	pthread_mutex_t		lock;
-	pthread_cond_t		rendez;
-	struct queue		freelist;
-	size_t			issued;
-	size_t			owned;
-	size_t			bufsize;
-	size_t			nbufs;
-	size_t			nmax;
-	int                     reserve;
+	module_global_t *module;
+	vmk_HeapID    heap_id;
+	vmk_Lock      lock;
+	struct queue  freelist;
+	size_t        issued;
+	size_t        owned;
+	size_t        bufsize;
+	size_t        nbufs;
+	size_t        nmax;
+	int           reserve;
 
 #ifdef  BUFPOOL_STATS_ENABLED
-	int			nmallocs;
-	int			nfrees;
+	int           nmallocs;
+	int           nfrees;
 #endif
 
-	BUFPOOL_STATE		state;
+	BUFPOOL_STATE state;
 } bufpool_t;
 
 static inline size_t bufpool_bufsize(bufpool_t *bp) { return bp->bufsize; }
 
-int bufpool_init(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs, size_t nmax);
-int bufpool_init_reserve(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs,
+int bufpool_init(bufpool_t *bp, const char *name, module_global_t *module,
+		size_t bufsize, size_t nbufs, size_t nmax);
+int bufpool_init_reserve(bufpool_t *bp, const char *name,
+		module_global_t *module, size_t bufsize, size_t nbufs,
 		int reserve, size_t nmax);
 void bufpool_deinit(bufpool_t *bp);
 int bufpool_get(bufpool_t *bp, char **bufp, int noblock);/* pseudo-blocking */
