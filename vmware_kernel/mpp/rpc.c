@@ -1,8 +1,5 @@
-#include <stdio.h>
-#include <assert.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
+#include "vmkapi.h"
+#include "vmware_include.h"
 #include "rpc.h"
 #include "threadpool.h"
 
@@ -19,6 +16,7 @@ static inline int get_bucket(hash_table_t *ht, uint32_t id)
 	return id % hash_no_buckets(ht);
 }
 
+#if 0
 rpc_chan_t *rpc_chan_new(void)
 {
 	return calloc(1, sizeof(rpc_chan_t));
@@ -28,6 +26,7 @@ void rpc_chan_free(rpc_chan_t *rcp)
 {
 	free(rcp);
 }
+#endif
 
 static inline void _rpc_response(rpc_chan_t *rcp, rpc_msg_t *resp)
 {
@@ -175,23 +174,31 @@ static inline void _rpc_chan_deinit(rpc_chan_t *rcp)
 	bufpool_deinit(&rcp->ploadpool);
 	bufpool_deinit(&rcp->msgpool);
 	hash_deinit(&rcp->hash);
-	pthread_mutex_destroy(&rcp->lock);
+	pthread_mutex_destroy(rcp->lock);
 	memset(rcp, 0, sizeof(*rcp));
 }
 
-int rpc_chan_init(rpc_chan_t *rcp, sock_handle_t socket, size_t nway,
-	int reserve, size_t msgsz, size_t hashsz, rpchandler_t req_handler,
-	rpchandler_t resp_handler)
+int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
+		sock_handle_t socket, size_t nway, int reserve, size_t msgsz,
+		size_t hashsz, rpchandler_t req_handler,
+		rpchandler_t resp_handler)
 {
-	int	 nmsg;
-	int	 nmsg_max;
-	int	 ndata;
-	int	 ndata_max;
-	int	 gap;
-	int	 rc;
+	int  nmsg;
+	int  nmsg_max;
+	int  ndata;
+	int  ndata_max;
+	int  gap;
+	int  rc;
+	char n[128];
+	char n1[128];
 
 	assert(resp_handler != NULL);
 	assert(req_handler  != NULL);
+
+	rc = vmware_name(n, module->module, "rpc", sizeof(n));
+	if (rc < 0) {
+		return -1;
+	}
 
 	memset(rcp, 0, sizeof(*rcp));
 
@@ -201,25 +208,35 @@ int rpc_chan_init(rpc_chan_t *rcp, sock_handle_t socket, size_t nway,
 	ndata_max = ndata * 3;
 	gap       = ((char *) &(((rpc_msg_t *) 0)->hdr)) - ((char *) 0);
 
-	rc = hash_init(&rcp->hash, hashsz, seqid_cmp);
+	rc = hash_init(&rcp->hash, n, module->mod_id, hashsz, seqid_cmp);
 	if (rc < 0) {
 		return -1;
 	}
 
-	rc = bufpool_init_reserve(&rcp->msgpool, "msg-pool", msgsz + gap, nmsg,
-			reserve, nmsg_max);
+	rc = vmware_name(n1, n, "msg", sizeof(n1));
 	if (rc < 0) {
-		fprintf(stderr, "bufpool_init failed.\n");
 		goto error;
 	}
 
-	rc = bufpool_init_reserve(&rcp->ploadpool, "pload-pool", PAYLOADMAX,
+	rc = bufpool_init_reserve(&rcp->msgpool, n1, module, msgsz + gap, nmsg,
+			reserve, nmsg_max);
+	if (rc < 0) {
+		vmk_WarningMessage("%S: bufpool_init_reserve failed\n", __func__);
+		goto error;
+	}
+
+	rc = vmware_name(n1, n, "payload", sizeof(n1));
+	if (rc < 0) {
+		goto error;
+	}
+
+	rc = bufpool_init_reserve(&rcp->ploadpool, n1, module, PAYLOADMAX,
 			ndata, reserve, ndata_max);
 	if (rc < 0) {
 		goto error;
 	}
 
-	rc = pthread_mutex_init(&rcp->lock, NULL);
+	rc = pthread_mutex_init(rcp->lock, n, module);
 	if (rc < 0) {
 		goto error;
 	}
