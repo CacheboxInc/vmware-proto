@@ -1,27 +1,56 @@
-#include <stdio.h>
-#include <assert.h>
-#include <errno.h>
-#include <unistd.h>
-#include <string.h>
+#include "vmkapi.h"
+#include "vmkapi_socket.h"
+#include "vmkapi_socket_ip.h"
+#include "vmware_include.h"
 #include "network.h"
 
-#ifdef VMWARE
+
+
 typedef struct vmware_socket {
 	vmk_Socket      sock;
 	int             enabled;
 	sock_handle_t   handle;
 } vmware_socket_t;
 
-vmware_socket_t *vmw_socks;
-#endif
+static vmk_HeapID vmw_socks_heap_id;
+vmware_socket_t   *vmw_socks;
 
-#ifdef VMWARE
-int vmware_socket_sys_init(void)
+int vmware_socket_sys_init(char *name, vmk_ModuleID module_id)
 {
-	vmw_socks = calloc(MAX_SOCKETS, sizeof(*vmw_socks));
-	if (vmw_socks == NULL) {
+	int rc;
+	vmk_HeapCreateProps props;
+
+	props.type              = VMK_HEAP_TYPE_SIMPLE;
+	props.module            = module_id;
+	props.initial           = MAX_SOCKETS * sizeof(*vmw_socks);
+	props.max               = props.initial;
+	props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
+	rc                      = vmk_NameInitialize(&props.name, name);
+	assert(rc == VMK_OK);
+
+	rc  = vmk_HeapCreate(&props, &vmw_socks_heap_id);
+	if (rc != VMK_OK) {
+		vmk_WarningMessage("HeapCreate failed for alignedHeap");
 		return -1;
 	}
+
+	vmw_socks = calloc(vmw_socks_heap_id, MAX_SOCKETS, sizeof(*vmw_socks));
+	if (vmw_socks == NULL) {
+		vmk_WarningMessage("Failed to allocate memory for vmw_socks");
+		vmk_HeapDestroy(vmw_socks_heap_id);
+		return -1;
+	}
+
+	return 0;
+}
+
+int vmware_socket_sys_deinit(void)
+{
+	if (vmw_socks) {
+		free(vmw_socks_heap_id, vmw_socks);
+	}
+
+	vmk_HeapDestroy(vmw_socks_heap_id);
 	return 0;
 }
 
@@ -55,15 +84,13 @@ static inline vmware_socket_t *vmware_socket_get(sock_handle_t h)
 
 	return &vmw_socks[h];
 }
-#endif
 
-#ifdef VMWARE
 static sock_handle_t socket(int domain, int type, int protocol)
 {
 	vmware_socket_t  *vs;
 	VMK_ReturnStatus rc;
 
-	vs = find_free_socket();
+	vs = vmware_socket_find_free();
 	if (vs == NULL) {
 		return -1;
 	}
@@ -71,21 +98,19 @@ static sock_handle_t socket(int domain, int type, int protocol)
 
 	rc = vmk_SocketCreate(domain, type, protocol, &vs->sock);
 	if (rc != VMK_OK) {
-		free_socket(&vs);
+		vmware_socket_free(&vs);
 		return -1;
 	}
 
 	vs->enabled = 1;
 	return vs->handle;
 }
-#endif
 
 int socket_create(int domain, int type, int protocol)
 {
 	return socket(domain, type, protocol);
 }
 
-#ifdef VMWARE
 int bind(sock_handle_t handle, sockaddr_t *addr, socklen_t len)
 {
 	vmware_socket_t  *vs;
@@ -107,12 +132,10 @@ int bind(sock_handle_t handle, sockaddr_t *addr, socklen_t len)
 
 	return 0;
 }
-#endif
 
 static inline int sockaddr_fill(sockaddr_in_t *addr, sa_family_t family,
 		in_port_t port, char *ip, size_t size)
 {
-#ifdef VMWARE
 	VMK_ReturnStatus rc;
 
 	memset(addr, 0, sizeof(*addr));
@@ -124,16 +147,7 @@ static inline int sockaddr_fill(sockaddr_in_t *addr, sa_family_t family,
 
 	addr->sin_len = sizeof(*addr);
 	addr->sin_family = family;
-	addri->sin_port = vmk_Htons(port);
-#else
-	memset(addr, 0, sizeof(*addr));
-
-	addr->sin_family = family;
-	addr->sin_port   = port;
-	if (inet_aton(ip, &addr->sin_addr) == 0) {
-		return -1;
-	}
-#endif
+	addr->sin_port = vmk_Htons(port);
 	return 0;
 }
 
@@ -142,19 +156,7 @@ int socket_bind(sock_handle_t handle, sockaddr_t *addr, socklen_t len)
 	return bind(handle, addr, len);
 }
 
-#ifndef VMWARE
-int socket_listen(sock_handle_t handle, int backlog)
-{
-	return listen(handle, backlog);
-}
 
-int socket_accept(sock_handle_t handle, sockaddr_t *addr, socklen_t *len)
-{
-	return accept(handle, addr, len);
-}
-#endif
-
-#ifdef VMWARE
 int connect(sock_handle_t handle, sockaddr_t *addr, socklen_t len)
 {
 	vmware_socket_t  *vs;
@@ -176,14 +178,12 @@ int connect(sock_handle_t handle, sockaddr_t *addr, socklen_t len)
 
 	return 0;
 }
-#endif
 
 int socket_connect(sock_handle_t handle, sockaddr_t *addr, socklen_t len)
 {
 	return connect(handle, addr, len);
 }
 
-#ifdef VMWARE
 static ssize_t read(sock_handle_t handle, char *buf, size_t count)
 {
 	vmware_socket_t  *vs;
@@ -199,7 +199,7 @@ static ssize_t read(sock_handle_t handle, char *buf, size_t count)
 		return -1;
 	}
 
-	rc = vmk_SocketRecvFrom(&vs->sock, MSG_WAITALL, NULL, NULL, buf, count,
+	rc = vmk_SocketRecvFrom(vs->sock, 0, NULL, NULL, buf, count,
 			&br);
 	if (rc != VMK_OK) {
 		return -1;
@@ -207,23 +207,19 @@ static ssize_t read(sock_handle_t handle, char *buf, size_t count)
 
 	return br;
 }
-#endif
 
 static ssize_t safe_read(sock_handle_t handle, char *buf, size_t count)
 {
 	char    *b;
 	ssize_t bc;
 	ssize_t rc;
+	int 	errno;
 
 	b  = buf;
 	bc = 0;
 	while (count != 0) {
 		rc = read(handle, b, count);
 		if (rc < 0 || rc == 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-
 			break;
 		}
 
@@ -240,7 +236,6 @@ ssize_t socket_read(sock_handle_t handle, char *buf, size_t count)
 	return safe_read(handle, buf, count);
 }
 
-#ifdef VMWARE
 static ssize_t write(sock_handle_t handle, char *buf, size_t count)
 {
 	vmware_socket_t  *vs;
@@ -256,30 +251,26 @@ static ssize_t write(sock_handle_t handle, char *buf, size_t count)
 		return -1;
 	}
 
-	rc = vmk_SocketSendTo(&vs->sock, 0, NULL, buf, count, &bw);
+	rc = vmk_SocketSendTo(vs->sock, 0, NULL, buf, count, &bw);
 	if (rc != VMK_OK) {
 		return -1;
 	}
 
 	return bw;
 }
-#endif
 
 static ssize_t safe_write(sock_handle_t handle, char *buf, size_t count)
 {
 	char    *b;
 	ssize_t bc;
 	ssize_t rc;
+	int 	errno;
 
 	b  = buf;
 	bc = 0;
 	while (count != 0) {
 		rc = write(handle, b, count);
 		if (rc < 0 || rc == 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-
 			break;
 		}
 
@@ -296,7 +287,6 @@ ssize_t socket_write(sock_handle_t handle, char *buf, size_t count)
 	return safe_write(handle, buf, count);
 }
 
-#ifdef VMWARE
 int close(sock_handle_t handle)
 {
 	vmware_socket_t  *vs;
@@ -311,12 +301,12 @@ int close(sock_handle_t handle)
 		return -1;
 	}
 
-	rc = vmk_SocketShutdown(&vs->sock, SHUT_RDWR);
+	rc = vmk_SocketShutdown(vs->sock, VMK_SOCKET_SHUT_RDWR);
 	if (rc != VMK_OK) {
 		/* ignore error */
 	}
 
-	rc = vmk_SocketClose(&vs->sock);
+	rc = vmk_SocketClose(vs->sock);
 	if (rc != VMK_OK) {
 		return -1;
 	}
@@ -324,48 +314,11 @@ int close(sock_handle_t handle)
 	vmware_socket_free(vs);
 	return 0;
 }
-#endif
 
 int socket_close(sock_handle_t handle)
 {
 	return close(handle);
 }
-
-#ifndef VMWARE
-int server_setup(char *ip, int ip_len, int port, sock_handle_t *handle)
-{
-	sockaddr_in_t a;
-	sock_handle_t sh;
-	int           rc;
-
-	*handle = -1;
-	sh      = socket_create(PF_INET, SOCK_STREAM, 0);
-	if (sh < 0) {
-		return -1;
-	}
-
-	rc = sockaddr_fill(&a, AF_INET, port, ip, ip_len);
-	if (rc < 0) {
-		goto error;
-	}
-
-	rc = socket_bind(sh, (sockaddr_t *) &a, sizeof(a));
-	if (rc < 0) {
-		goto error;
-	}
-
-	rc = socket_listen(sh, MAX_BACKLOG);
-	if (rc < 0) {
-		goto error;
-	}
-
-	*handle = sh;
-	return 0;
-error:
-	socket_close(sh);
-	return -1;
-}
-#endif
 
 int client_setup(char *dip, int dip_len, int dport, char *sip, int sip_len,
 		int sport, sock_handle_t *handle)
@@ -376,12 +329,12 @@ int client_setup(char *dip, int dip_len, int dport, char *sip, int sip_len,
 	sockaddr_in_t da; /* destination IP address representation */
 
 	*handle = -1;
-	sh      = socket_create(PF_INET, SOCK_STREAM, 0);
+	sh      = socket_create(VMK_SOCKET_AF_INET, VMK_SOCKET_SOCK_STREAM, 0);
 	if (sh < 0) {
 		return -1;
 	}
 
-	rc = sockaddr_fill(&sa, AF_INET, sport, sip, sip_len);
+	rc = sockaddr_fill(&sa, VMK_SOCKET_AF_INET, sport, sip, sip_len);
 	if (rc < 0) {
 		goto error;
 	}
@@ -391,7 +344,7 @@ int client_setup(char *dip, int dip_len, int dport, char *sip, int sip_len,
 		goto error;
 	}
 
-	rc = sockaddr_fill(&da, AF_INET, dport, dip, dip_len);
+	rc = sockaddr_fill(&da, VMK_SOCKET_AF_INET, dport, dip, dip_len);
 	if (rc < 0) {
 		goto error;
 	}
