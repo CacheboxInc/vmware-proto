@@ -12,6 +12,7 @@ typedef vmk_uint16  uint16_t;
 typedef vmk_uint32  uint32_t;
 typedef vmk_uint64  uint64_t;
 typedef vmk_WorldID pthread_t;
+typedef vmk_Lock    pthread_mutex_t;
 
 typedef struct module_global {
 	char             *module;
