@@ -133,7 +133,7 @@ error:
 	return -1;
 }
 
-static void *rpc_recv_thread(void *args)
+static VMK_ReturnStatus rpc_recv_thread(void *args)
 {
 	rpc_chan_t *rcp = args;
 	int        rc;
@@ -160,7 +160,7 @@ static void *rpc_recv_thread(void *args)
 	w->work_fn = _rpc_recv_handler;
 	rc         = schedule_work(&rcp->tp, w);
 	assert(rc  == 0);
-	return NULL;
+	return VMK_OK;
 }
 
 static inline void _rpc_chan_deinit(rpc_chan_t *rcp)
@@ -247,12 +247,12 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	rcp->enabled      = 1;
 	rcp->seqid        = 1;
 
-	rc = thread_pool_init(&rcp->tp, nway);
+	rc = thread_pool_init(&rcp->tp, n, module, nway);
 	if (rc < 0) {
 		goto error;
 	}
 
-	rc = pthread_create(&rcp->recv_thread, NULL, rpc_recv_thread, rcp);
+	rc = pthread_create(&rcp->recv_thread, n, module, rpc_recv_thread, rcp);
 	if (rc < 0) {
 		goto error;
 	}

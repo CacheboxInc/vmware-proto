@@ -152,7 +152,7 @@ int thread_pool_init(thread_pool_t *tp, const char *name,
 			goto error;
 		}
 
-		rc = pthread_create(h, n1, _worker_thread, tp, module);
+		rc = pthread_create(h, n1, module, _worker_thread, tp);
 		if (rc < 0) {
 			goto error;
 		}

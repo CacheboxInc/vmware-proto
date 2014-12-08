@@ -105,7 +105,7 @@ static inline int pthread_mutex_destroy(vmk_Lock lock)
 }
 
 static inline int pthread_create(vmk_WorldID *world_id, const char *name,
-		vmk_WorldStartFunc t_func, void *data,  module_global_t *module)
+		module_global_t *module, vmk_WorldStartFunc t_func, void *data)
 {
 	VMK_ReturnStatus status = VMK_FAILURE;
 	vmk_WorldProps props;
