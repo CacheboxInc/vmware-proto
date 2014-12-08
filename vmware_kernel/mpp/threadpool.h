@@ -16,7 +16,6 @@ typedef struct thread_pool {
 	int             active;
 
 	pthread_mutex_t work_lock;
-	pthread_cond_t  work_cond;
 	dll_t           work_list;
 	int             work_pend;
 	pool_state_t    state;
