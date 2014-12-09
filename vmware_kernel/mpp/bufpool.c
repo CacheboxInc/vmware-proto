@@ -23,12 +23,16 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 	assert(bp);
 	assert(nbufs > 0 && nmax >= nbufs);
 
+	BZERO(bp);
+
 	r = vmware_name(n, name, "bufpool", sizeof(n));
 	assert(r == 0);
 
 	if (bufsize < sizeof(dll_t)) {
 		bufsize = sizeof(dll_t);
 	}
+
+	vmk_WarningMessage("%s bufsize = %lu nbufs = %d\n", __func__, bufsize, nbufs);
 
         props.type              = VMK_HEAP_TYPE_SIMPLE;
         props.module            = module->mod_id;
@@ -43,7 +47,6 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 		return -1;
 	}
 
-	BZERO(bp);
 	queue_init(&bp->freelist);
 	bp->bufsize = bufsize;
 	bp->nbufs   = nbufs;
@@ -51,13 +54,14 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 	bp->state   = INITIALIZED;
 	bp->reserve = reserve;
 
-	r = pthread_mutex_init(bp->lock, n, module);
+	r = pthread_mutex_init(&bp->lock, n, module);
 	assert(r == 0);
 
 	for (bp->owned = 0; bp->owned < nbufs; bp->owned++) {
 		if ((buf = (dll_t *) malloc(bp->heap_id, bufsize)) == NULL) {
 			return bp->owned;
 		}
+		vmk_WarningMessage("allocated memory\n");
 		DLL_INIT(buf);
 		queue_add(&bp->freelist, buf);
 	}

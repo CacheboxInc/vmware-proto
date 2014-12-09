@@ -12,9 +12,11 @@
 #include "vmkapi.h"
 #include "vmkapi_socket.h"
 #include "vmkapi_socket_ip.h"
+#include "threadpool.h"
 #include "mgmtInterface.h"
 
 static VMK_ReturnStatus send_msg(void *);
+VMK_ReturnStatus threadpool_test(void);
 
 
 VMK_ReturnStatus start_send_msg(void);
@@ -4296,6 +4298,11 @@ init_module(void)
 	goto error;
       }
 #endif
+      /* Test for threapool */
+      if (VMK_OK != threadpool_test()) {
+	      vmk_WarningMessage("threadpool_test failed");
+	      goto error;
+      }
 
       return 0;
    }
@@ -4430,6 +4437,109 @@ cleanup_module(void)
    vmk_ConfigParamClose(configLogMPCmdErrorsHandle);
 
    return;
+}
+
+void do_work(work_t *w, void *data)
+{
+	char *msg = (char *) data;
+	assert(data != NULL);
+
+	vmk_WorldSleep(1000000);
+	vmk_WarningMessage("%s", data);
+	vmk_HeapFree(miscHeap, data);
+}
+
+VMK_ReturnStatus threadpool_func(void *data)
+{
+#if 1
+	module_global_t module;
+	thread_pool_t   tp;
+	char            *tmp;
+	int             rc;
+	int             i;
+	work_t          *w;
+	vmk_Bool        tpool_init = VMK_FALSE;
+
+	module.module   = EXAMPLE_NAME;
+	module.mod_id   = moduleID;
+	module.heap_id  = miscHeap;
+	module.lockd_id = lockDomain;
+
+	rc = thread_pool_init(&tp, "test", &module, 10);
+	if (rc < 0) {
+		vmk_WarningMessage("thread_pool_init failed");
+		goto err;
+	}
+	tpool_init = VMK_TRUE;
+
+	for (i = 0; i < 1000; i++) {
+		w = new_work(&tp);
+		w->data = vmk_HeapAlloc(miscHeap, 100);
+		vmk_StringFormat(w->data, 100, NULL, "Number-%d", i);
+		w->work_fn = do_work;
+		rc = schedule_work(&tp, w);
+		assert(rc == 0);
+	}
+
+	vmk_WarningMessage("**** calling deinit ******\n");
+	vmk_WarningMessage("**** calling deinit ******\n");
+	vmk_WarningMessage("**** calling deinit ******\n");
+	vmk_WarningMessage("**** calling deinit ******\n");
+	thread_pool_deinit(&tp);
+	vmk_WarningMessage("**** deinit DONE ******\n");
+	return VMK_OK;
+err:
+	if (tpool_init == VMK_TRUE) {
+		thread_pool_deinit(&tp);
+	}
+
+	return VMK_FAILURE;
+#else
+	module_global_t module;
+	bufpool_t       bp;
+	int             rc;
+	char            *buf;
+
+	module.module   = EXAMPLE_NAME;
+	module.mod_id   = moduleID;
+	module.heap_id  = miscHeap;
+	module.lockd_id = lockDomain;
+
+	rc = bufpool_init(&bp, EXAMPLE_NAME, &module, 100, 1, 2);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
+	bufpool_deinit(&bp);
+
+	return VMK_OK;
+#endif
+}
+
+VMK_ReturnStatus threadpool_test(void)
+{
+	/* 1. start main work creating  thread
+	   2. inside this thread, create thread pool
+	   3. thread pool work function should sleep before work
+	   4. 
+	 */
+	VMK_ReturnStatus status = VMK_FAILURE;
+	vmk_WorldProps props;
+
+
+	/* Create the world */
+	props.name = EXAMPLE_NAME"-threadpool";
+	props.moduleID = moduleID;
+	props.startFunction = threadpool_func;
+	props.data = NULL;
+	props.schedClass = VMK_WORLD_SCHED_CLASS_DEFAULT;
+	status = vmk_WorldCreate(&props, NULL);
+
+	if (status != VMK_OK) {
+		vmk_WarningMessage("threadpool world create failed\n");
+	}
+
+	return status;
 }
 
 VMK_ReturnStatus

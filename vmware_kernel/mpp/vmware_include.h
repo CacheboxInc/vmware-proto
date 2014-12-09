@@ -56,7 +56,7 @@ static inline int vmware_name(char *dst, const char *src1, const char *src2,
 	return -1;
 }
 
-static inline int pthread_mutex_init(vmk_Lock lock, char *name, module_global_t *module)
+static inline int pthread_mutex_init(vmk_Lock *lock, char *name, module_global_t *module)
 {
 	vmk_ByteCount           bc;
 	char                    n[128];
@@ -73,12 +73,13 @@ static inline int pthread_mutex_init(vmk_Lock lock, char *name, module_global_t 
 	p.heapID   = module->heap_id;
 	p.moduleID = module->mod_id;
 	p.rank     = 1; /* TODO: multiple ranks may be required */
+	p.type     = VMK_SPINLOCK;
 	rc         = vmk_NameInitialize(&p.name, n);
 	if (rc != VMK_OK) {
 		return -1;
 	}
 
-	rc = vmk_SpinlockCreate(&p, &lock);
+	rc = vmk_SpinlockCreate(&p, lock);
 	if (rc != VMK_OK) {
 		return -1;
 	}

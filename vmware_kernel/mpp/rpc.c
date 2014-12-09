@@ -236,7 +236,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 		goto error;
 	}
 
-	rc = pthread_mutex_init(rcp->lock, n, module);
+	rc = pthread_mutex_init(&rcp->lock, n, module);
 	if (rc < 0) {
 		goto error;
 	}

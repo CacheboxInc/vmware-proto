@@ -133,7 +133,7 @@ int thread_pool_init(thread_pool_t *tp, const char *name,
 	}
 
 	/* init locks */
-	rc = pthread_mutex_init(tp->work_lock, n, module);
+	rc = pthread_mutex_init(&tp->work_lock, n, module);
 	if (rc < 0) {
 		goto error;
 	}
