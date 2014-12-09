@@ -175,6 +175,7 @@ static inline void _rpc_chan_deinit(rpc_chan_t *rcp)
 	bufpool_deinit(&rcp->msgpool);
 	hash_deinit(&rcp->hash);
 	pthread_mutex_destroy(rcp->lock);
+	vmware_socket_sys_deinit();
 	memset(rcp, 0, sizeof(*rcp));
 }
 
@@ -196,6 +197,11 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	assert(req_handler  != NULL);
 
 	rc = vmware_name(n, module->module, "rpc", sizeof(n));
+	if (rc < 0) {
+		return -1;
+	}
+
+	rc = vmware_socket_sys_init(n, module);
 	if (rc < 0) {
 		return -1;
 	}

@@ -10,7 +10,7 @@ typedef struct vmware_socket {
 	sock_handle_t   handle;
 } vmware_socket_t;
 
-static vmk_HeapID vmw_socks_heap_id;
+static vmk_HeapID vmw_socks_heap_id = VMK_INVALID_HEAP_ID;
 vmware_socket_t   *vmw_socks;
 
 int vmware_socket_sys_init(char *name, module_global_t *module)
@@ -35,6 +35,10 @@ int vmware_socket_sys_init(char *name, module_global_t *module)
 
 int vmware_socket_sys_deinit(void)
 {
+	if (vmw_socks_heap_id == VMK_INVALID_HEAP_ID) {
+		return 0;
+	}
+
 	if (vmw_socks) {
 		free(vmw_socks_heap_id, vmw_socks);
 	}
