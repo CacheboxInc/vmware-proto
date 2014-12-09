@@ -22,8 +22,8 @@ typedef struct hash_table {
 	int		    no_buckets;
 } hash_table_t;
 
-
-int hash_init(hash_table_t *hash, const char *, vmk_ModuleID, int no_buckets, cmp_fn_t fun);
+int hash_init(hash_table_t *hash, const char *, module_global_t *,
+		int no_buckets, cmp_fn_t fun);
 void hash_deinit(hash_table_t *hash);
 void hash_cleanup(hash_table_t *hash, cleanup_fn_t cleanup);
 int hash_add(hash_table_t *hash, hash_entry_t *new_entry, int bucket);

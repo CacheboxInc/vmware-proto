@@ -4,8 +4,6 @@
 #include "vmware_include.h"
 #include "network.h"
 
-
-
 typedef struct vmware_socket {
 	vmk_Socket      sock;
 	int             enabled;
@@ -15,22 +13,13 @@ typedef struct vmware_socket {
 static vmk_HeapID vmw_socks_heap_id;
 vmware_socket_t   *vmw_socks;
 
-int vmware_socket_sys_init(char *name, vmk_ModuleID module_id)
+int vmware_socket_sys_init(char *name, module_global_t *module)
 {
 	int rc;
-	vmk_HeapCreateProps props;
 
-	props.type              = VMK_HEAP_TYPE_SIMPLE;
-	props.module            = module_id;
-	props.initial           = MAX_SOCKETS * sizeof(*vmw_socks);
-	props.max               = props.initial;
-	props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
-	rc                      = vmk_NameInitialize(&props.name, name);
-	assert(rc == VMK_OK);
-
-	rc  = vmk_HeapCreate(&props, &vmw_socks_heap_id);
-	if (rc != VMK_OK) {
-		vmk_WarningMessage("HeapCreate failed for alignedHeap");
+	rc = vmware_heap_create(&vmw_socks_heap_id, name, module, MAX_SOCKETS,
+			sizeof(*vmw_socks));
+	if (rc < 0) {
 		return -1;
 	}
 

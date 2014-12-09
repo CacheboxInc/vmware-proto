@@ -22,7 +22,7 @@ int     socket_connect(sock_handle_t, sockaddr_t *addr, socklen_t len);
 ssize_t socket_read(sock_handle_t, char *buf, size_t count);
 ssize_t socket_write(sock_handle_t, char *buf, size_t count);
 int     socket_close(sock_handle_t handle);
-int vmware_socket_sys_init(char *name, vmk_ModuleID module_id);
+int vmware_socket_sys_init(char *name, module_global_t *module);
 
 int client_setup(char *dip, int dip_len, int dpor, char *sip, int sip_len,
 		int sport, sock_handle_t *handle);

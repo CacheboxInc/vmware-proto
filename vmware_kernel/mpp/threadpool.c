@@ -101,25 +101,16 @@ int thread_pool_init(thread_pool_t *tp, const char *name,
 	int  nwork_max;
 	char n[128];
 	char n1[128];
-
-	vmk_HeapCreateProps props;
-	pthread_t           *h;
+	pthread_t *h;
 
 	memset(tp, 0, sizeof(*tp));
 
 	rc = vmware_name(n, name, "threadpool", sizeof(n));
 	assert(rc == 0);
 
-	props.type              = VMK_HEAP_TYPE_SIMPLE;
-	props.module            = module->mod_id;
-	props.initial           = nthreads * sizeof(*tp->threads);
-	props.max               = props.initial;
-	props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
-	rc                      = vmk_NameInitialize(&props.name, n);
-	VMK_ASSERT(rc == VMK_OK);
-
-	rc  = vmk_HeapCreate(&props, &tp->heap_id);
-	if (rc != VMK_OK) {
+	rc = vmware_heap_create(&tp->heap_id, n, module, nthreads,
+			sizeof(*tp->threads));
+	if (rc < 0) {
 		return -1;
 	}
 

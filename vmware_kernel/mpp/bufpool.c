@@ -14,11 +14,10 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 	module_global_t *module, size_t bufsize, size_t nbufs, int reserve,
 	size_t nmax)
 {
-	char                    n[128];
-	vmk_HeapCreateProps     props;
-	VMK_ReturnStatus        rc;
-	int                     r;
-	dll_t                   *buf;
+	char             n[128];
+	VMK_ReturnStatus rc;
+	int              r;
+	dll_t            *buf;
 
 	assert(bp);
 	assert(nbufs > 0 && nmax >= nbufs);
@@ -32,18 +31,8 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 		bufsize = sizeof(dll_t);
 	}
 
-	vmk_WarningMessage("%s bufsize = %lu nbufs = %d\n", __func__, bufsize, nbufs);
-
-        props.type              = VMK_HEAP_TYPE_SIMPLE;
-        props.module            = module->mod_id;
-        props.initial           = bufsize * nbufs;
-        props.max               = bufsize * nmax;
-        props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
-        rc                      = vmk_NameInitialize(&props.name, n);
-        VMK_ASSERT(rc == VMK_OK);
-
-	rc  = vmk_HeapCreate(&props, &bp->heap_id);
-	if (rc != VMK_OK) {
+	r = vmware_heap_create(&bp->heap_id, n, module, nmax, bufsize);
+	if (r < 0) {
 		return -1;
 	}
 
@@ -61,7 +50,6 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 		if ((buf = (dll_t *) malloc(bp->heap_id, bufsize)) == NULL) {
 			return bp->owned;
 		}
-		vmk_WarningMessage("allocated memory\n");
 		DLL_INIT(buf);
 		queue_add(&bp->freelist, buf);
 	}

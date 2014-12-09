@@ -208,7 +208,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	ndata_max = ndata * 3;
 	gap       = ((char *) &(((rpc_msg_t *) 0)->hdr)) - ((char *) 0);
 
-	rc = hash_init(&rcp->hash, n, module->mod_id, hashsz, seqid_cmp);
+	rc = hash_init(&rcp->hash, n, module, hashsz, seqid_cmp);
 	if (rc < 0) {
 		return -1;
 	}

@@ -1,17 +1,18 @@
 #include "vmware_include.h"
 #include "hash.h"
 
-int hash_init(hash_table_t *hash, const char *name, vmk_ModuleID module_id, int no_buckets, cmp_fn_t fun)
+int hash_init(hash_table_t *hash, const char *name, module_global_t *module, int no_buckets, cmp_fn_t fun)
 {
 	int   i;
 	dll_t *t;
 	int   rc;
-	vmk_HeapCreateProps props;
-	char n[128];
+	char  n[128];
 
 	assert(hash != NULL);
 	assert(fun != NULL);
 	assert(no_buckets > 0);
+
+	memset(hash, 0, sizeof(*hash));
 
 	rc = vmware_name(n, name, "hash", sizeof(n));
 	if (rc < 0) {
@@ -19,19 +20,10 @@ int hash_init(hash_table_t *hash, const char *name, vmk_ModuleID module_id, int 
 		return -1;
 	}
 
-	memset(hash, 0, sizeof(*hash));
-
-	props.type              = VMK_HEAP_TYPE_SIMPLE;
-	props.module            = module_id;
-	props.initial           = no_buckets * sizeof(*hash->buckets);
-	props.max               = props.initial;
-	props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
-	rc                      = vmk_NameInitialize(&props.name, n);
-	VMK_ASSERT(rc == VMK_OK);
-
-	rc  = vmk_HeapCreate(&props, &hash->heap_id);
-	if (rc != VMK_OK) {
-		vmk_WarningMessage("HeapCreate failed for alignedHeap");
+	rc = vmware_heap_create(&hash->heap_id, name, module, no_buckets,
+			sizeof(*hash->buckets));
+	if (rc < 0) {
+		vmk_WarningMessage("%s: creating heap failed.\n", __func__);
 		return -1;
 	}
 

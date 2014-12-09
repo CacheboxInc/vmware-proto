@@ -23,14 +23,14 @@ typedef struct module_global {
 
 static void *malloc(vmk_HeapID id, size_t size)
 {
-	return vmk_HeapAlloc(id, size);
+	return vmk_HeapAlign(id, size, 2);
 }
 
 static void *calloc(vmk_HeapID id, size_t nmemb, size_t size)
 {
 	void *p;
 
-	p = vmk_HeapAlloc(id, nmemb * size);
+	p = vmk_HeapAlign(id, nmemb * size, 2);
 	if (p) {
 		vmk_Memset(p, 0, nmemb * size);
 	}
@@ -40,6 +40,51 @@ static void *calloc(vmk_HeapID id, size_t nmemb, size_t size)
 static void free(vmk_HeapID id, void *ptr)
 {
 	return vmk_HeapFree(id, ptr);
+}
+
+/*
+ * vmware_heap_create
+ * ==================
+ * - create heap suitable for holding number of members (nmemb) each of fixed
+ * size (size).
+ *
+ * On success:
+ *     0 is returned and *heap_id will contain ID of newly created heap.
+ *
+ * On error:
+ *     -1 is returned and *heap_id is initialized to 0.
+ */
+static int vmware_heap_create(vmk_HeapID *heap_id, const char *name,
+		module_global_t *module, size_t nmemb, size_t size)
+{
+	vmk_HeapAllocationDescriptor desc;
+	vmk_ByteCount                as;
+	VMK_ReturnStatus             rc;
+	vmk_HeapCreateProps          props;
+
+	*heap_id       = 0;
+	desc.size      = size;
+	desc.alignment = 0;
+	desc.count     = nmemb;
+	rc             = vmk_HeapDetermineMaxSize(&desc, 1, &as);
+	if (rc != VMK_OK) {
+		return -1;
+	}
+
+	props.type              = VMK_HEAP_TYPE_SIMPLE;
+	props.module            = module->mod_id;
+	props.initial           = as;
+	props.max               = props.initial;
+	props.creationTimeoutMS = VMK_TIMEOUT_NONBLOCKING;
+	rc                      = vmk_NameInitialize(&props.name, name);
+	VMK_ASSERT(rc == VMK_OK);
+
+	rc  = vmk_HeapCreate(&props, heap_id);
+	if (rc != VMK_OK) {
+		return -1;
+	}
+
+	return 0;
 }
 
 static inline int vmware_name(char *dst, const char *src1, const char *src2,
