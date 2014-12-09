@@ -15,14 +15,13 @@
 #include "threadpool.h"
 #include "mgmtInterface.h"
 
-static VMK_ReturnStatus send_msg(void *);
-VMK_ReturnStatus threadpool_test(void);
+VMK_ReturnStatus rpc_tests(void);
 
-
-VMK_ReturnStatus start_send_msg(void);
+// static VMK_ReturnStatus send_msg(void *);
+// VMK_ReturnStatus start_send_msg(void);
 //void Callback(vmk_TimerCookie unusedData);
-extern vmk_MgmtApiSignature mgmtSig;
-vmk_MgmtHandle mgmtHandle;
+// extern vmk_MgmtApiSignature mgmtSig;
+// vmk_MgmtHandle mgmtHandle;
 
 
 #define EXAMPLE_MISC_HEAP_INITIAL_SIZE (4096)
@@ -4299,8 +4298,8 @@ init_module(void)
       }
 #endif
       /* Test for threapool */
-      if (VMK_OK != threadpool_test()) {
-	      vmk_WarningMessage("threadpool_test failed");
+      if (VMK_OK != rpc_tests()) {
+	      vmk_WarningMessage("rpc_test failed");
 	      goto error;
       }
 
@@ -4439,6 +4438,93 @@ cleanup_module(void)
    return;
 }
 
+static inline _module_struct_init(module_global_t *module)
+{
+	module->module   = EXAMPLE_NAME;
+	module->mod_id   = moduleID;
+	module->heap_id  = miscHeap;
+	module->lockd_id = lockDomain;
+}
+
+VMK_ReturnStatus pthread_mutex_test(void)
+{
+	module_global_t module;
+	int             rc;
+	vmk_Lock        lock;
+	int             i;
+
+	_module_struct_init(&module);
+
+	rc = pthread_mutex_init(&lock, EXAMPLE_NAME, &module);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
+	for (i = 0; i < 10000; i++) {
+		pthread_mutex_lock(lock);
+
+		pthread_mutex_unlock(lock);
+	}
+
+	pthread_mutex_destroy(lock);
+
+	return VMK_OK;
+}
+
+VMK_ReturnStatus bufpool_test(void)
+{
+	const int        MAX = 200;
+	module_global_t  module;
+	bufpool_t        bp;
+	int              rc;
+	int              i;
+	char             *b;
+	char             *bufs[MAX + 10];
+	VMK_ReturnStatus rs;
+
+	_module_struct_init(&module);
+
+	vmk_Memset(bufs, 0, sizeof(bufs));
+
+	rc = bufpool_init(&bp, EXAMPLE_NAME, &module, 128, 100, MAX);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
+	vmk_WarningMessage("bufpool_init done\n");
+	for (i = 0; i < MAX; i++) {
+		b  = NULL;
+		rc = bufpool_get(&bp, &b, 1);
+		if (b == NULL || rc < 0) {
+			rs = VMK_FAILURE;
+			goto error;
+		}
+		bufs[i] = b;
+	}
+
+	b  = NULL;
+	rc = bufpool_get(&bp, &b, 1);
+	if (b == NULL || rc < 0) {
+		rs = VMK_OK;
+	} else {
+		bufpool_put(&bp, b);
+		rs = VMK_FAILURE;
+	}
+error:
+	for (i = 0; i < (sizeof(bufs) / sizeof(*bufs)); i++) {
+		b = bufs[i];
+
+		if (b == NULL) {
+			continue;
+		}
+
+		bufpool_put(&bp, b);
+	}
+
+	bufpool_deinit(&bp);
+	return rs;
+}
+
 void do_work(work_t *w, void *data)
 {
 	char *msg = (char *) data;
@@ -4449,28 +4535,22 @@ void do_work(work_t *w, void *data)
 	vmk_HeapFree(miscHeap, data);
 }
 
-VMK_ReturnStatus threadpool_func(void *data)
+VMK_ReturnStatus threadpool_test(void)
 {
-#if 1
 	module_global_t module;
 	thread_pool_t   tp;
 	char            *tmp;
 	int             rc;
 	int             i;
 	work_t          *w;
-	vmk_Bool        tpool_init = VMK_FALSE;
 
-	module.module   = EXAMPLE_NAME;
-	module.mod_id   = moduleID;
-	module.heap_id  = miscHeap;
-	module.lockd_id = lockDomain;
+	_module_struct_init(&module);
 
 	rc = thread_pool_init(&tp, "test", &module, 10);
 	if (rc < 0) {
 		vmk_WarningMessage("thread_pool_init failed");
 		goto err;
 	}
-	tpool_init = VMK_TRUE;
 
 	for (i = 0; i < 1000; i++) {
 		w = new_work(&tp);
@@ -4489,34 +4569,48 @@ VMK_ReturnStatus threadpool_func(void *data)
 	vmk_WarningMessage("**** deinit DONE ******\n");
 	return VMK_OK;
 err:
-	if (tpool_init == VMK_TRUE) {
-		thread_pool_deinit(&tp);
-	}
+	thread_pool_deinit(&tp);
 
 	return VMK_FAILURE;
-#else
-	module_global_t module;
-	bufpool_t       bp;
-	int             rc;
-	char            *buf;
-
-	module.module   = EXAMPLE_NAME;
-	module.mod_id   = moduleID;
-	module.heap_id  = miscHeap;
-	module.lockd_id = lockDomain;
-
-	rc = bufpool_init(&bp, EXAMPLE_NAME, &module, 100, 1, 2);
-	if (rc < 0) {
-		return VMK_FAILURE;
-	}
-
-	bufpool_deinit(&bp);
-
-	return VMK_OK;
-#endif
 }
 
-VMK_ReturnStatus threadpool_test(void)
+VMK_ReturnStatus run_tests(void *data)
+{
+	VMK_ReturnStatus rc;
+
+	vmk_WarningMessage("Running pthred_mutex test\n");
+	rc = pthread_mutex_test();
+	if (rc != VMK_OK) {
+		vmk_WarningMessage("pthread_mutex_test: FAILED\n");
+		goto error;
+	}
+	vmk_WarningMessage("pthread_mutex_test: PASSED\n");
+
+	vmk_WarningMessage("Running bufpool test\n");
+	rc = bufpool_test();
+	if (rc != VMK_OK) {
+		vmk_WarningMessage("bufpool test: FAILED.\n");
+		goto error;
+	}
+	vmk_WarningMessage("bufpool test: PASSED.\n");
+
+#if 0
+	vmk_WarningMessage("Running ThreadPool test\n");
+	rc = threadpool_test();
+	if (rc != VMK_OK) {
+		vmk_WarningMessage("ThreadPool test: FAILED.\n");
+		goto error;
+	}
+	vmk_WarningMessage("ThreadPool test: PASSED.\n");
+#endif
+
+	return VMK_OK;
+
+error:
+	return VMK_FAILURE;
+}
+
+VMK_ReturnStatus rpc_tests(void)
 {
 	/* 1. start main work creating  thread
 	   2. inside this thread, create thread pool
@@ -4530,7 +4624,7 @@ VMK_ReturnStatus threadpool_test(void)
 	/* Create the world */
 	props.name = EXAMPLE_NAME"-threadpool";
 	props.moduleID = moduleID;
-	props.startFunction = threadpool_func;
+	props.startFunction = run_tests;
 	props.data = NULL;
 	props.schedClass = VMK_WORLD_SCHED_CLASS_DEFAULT;
 	status = vmk_WorldCreate(&props, NULL);
@@ -4542,6 +4636,7 @@ VMK_ReturnStatus threadpool_test(void)
 	return status;
 }
 
+#if 0
 VMK_ReturnStatus
 start_send_msg(void)
 {
@@ -4870,4 +4965,4 @@ repeat:
         vmk_WarningMessage("Anup: Callback function ended <===\n");
 }
 #endif
-
+#endif
