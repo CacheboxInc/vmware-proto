@@ -4446,29 +4446,77 @@ static inline _module_struct_init(module_global_t *module)
 	module->lockd_id = lockDomain;
 }
 
-VMK_ReturnStatus pthread_mutex_test(void)
+static inline VMK_ReturnStatus _pthread_lock_test_func(void *data)
 {
-	module_global_t module;
-	int             rc;
-	vmk_Lock        lock;
+	pthread_mutex_t *lock = data;
 	int             i;
 
+	for (i = 0; i < 100; i++) {
+		pthread_mutex_lock(*lock);
+		pthread_mutex_unlock(*lock);
+	}
+
+	return VMK_OK;
+}
+
+VMK_ReturnStatus pthread_mutex_test(void)
+{
+	const int       MAX = 4;
+	module_global_t module;
+	int             rc;
+	pthread_mutex_t lock;
+	int             i;
+	pthread_t       threads[MAX];
+	char            n[128];
+
 	_module_struct_init(&module);
+
+	memset(threads, 0, sizeof(threads));
 
 	rc = pthread_mutex_init(&lock, EXAMPLE_NAME, &module);
 	if (rc < 0) {
 		return VMK_FAILURE;
 	}
 
+	vmk_WarningMessage("%s Running TEST1\n", __func__);
 	for (i = 0; i < 10000; i++) {
 		pthread_mutex_lock(lock);
-
 		pthread_mutex_unlock(lock);
+	}
+	vmk_WarningMessage("%s TEST1: PASSED\n", __func__);
+
+	vmk_WarningMessage("%s Running TEST2\n", __func__);
+	for (i = 0; i < MAX; i++) {
+		vmk_StringFormat(n, sizeof(n), NULL, "%s-%d", EXAMPLE_NAME, i);
+
+		rc = pthread_create(&threads[i], n, &module,
+				_pthread_lock_test_func, &lock);
+
+		if (rc < 0) {
+			goto error;
+		}
+	}
+
+	for (i = 0; i < MAX; i++) {
+		pthread_join(threads[i], NULL);
+	}
+	vmk_WarningMessage("%s TEST2: PASSED\n", __func__);
+
+	pthread_mutex_destroy(lock);
+	return VMK_OK;
+
+error:
+	for (i = 0; i < MAX; i++) {
+		if (threads[i] == 0) {
+			continue;
+		}
+
+		pthread_cancel(threads[i]);
 	}
 
 	pthread_mutex_destroy(lock);
-
-	return VMK_OK;
+	vmk_WarningMessage("%s A test failed.\n", __func__);
+	return VMK_FAILURE;
 }
 
 VMK_ReturnStatus bufpool_test(void)
@@ -4530,7 +4578,7 @@ void do_work(work_t *w, void *data)
 	char *msg = (char *) data;
 	assert(data != NULL);
 
-	vmk_WorldSleep(1000000);
+	vmk_WorldSleep(1000);
 	vmk_WarningMessage("%s", data);
 	vmk_HeapFree(miscHeap, data);
 }
@@ -4549,20 +4597,19 @@ VMK_ReturnStatus threadpool_test(void)
 	rc = thread_pool_init(&tp, "test", &module, 10);
 	if (rc < 0) {
 		vmk_WarningMessage("thread_pool_init failed");
-		goto err;
+		return VMK_FAILURE;
 	}
 
 	for (i = 0; i < 1000; i++) {
-		w = new_work(&tp);
-		w->data = vmk_HeapAlloc(miscHeap, 100);
-		vmk_StringFormat(w->data, 100, NULL, "Number-%d", i);
+		w          = new_work(&tp);
+		w->data    = vmk_HeapAlloc(miscHeap, 100);
 		w->work_fn = do_work;
+		vmk_StringFormat(w->data, 100, NULL, "Number-%d", i);
+
 		rc = schedule_work(&tp, w);
 		assert(rc == 0);
 	}
 
-	vmk_WarningMessage("**** calling deinit ******\n");
-	vmk_WarningMessage("**** calling deinit ******\n");
 	vmk_WarningMessage("**** calling deinit ******\n");
 	vmk_WarningMessage("**** calling deinit ******\n");
 	thread_pool_deinit(&tp);
@@ -4594,7 +4641,6 @@ VMK_ReturnStatus run_tests(void *data)
 	}
 	vmk_WarningMessage("bufpool test: PASSED.\n");
 
-#if 0
 	vmk_WarningMessage("Running ThreadPool test\n");
 	rc = threadpool_test();
 	if (rc != VMK_OK) {
@@ -4602,7 +4648,6 @@ VMK_ReturnStatus run_tests(void *data)
 		goto error;
 	}
 	vmk_WarningMessage("ThreadPool test: PASSED.\n");
-#endif
 
 	return VMK_OK;
 
@@ -4622,7 +4667,7 @@ VMK_ReturnStatus rpc_tests(void)
 
 
 	/* Create the world */
-	props.name = EXAMPLE_NAME"-threadpool";
+	props.name = EXAMPLE_NAME"-rpc-tests";
 	props.moduleID = moduleID;
 	props.startFunction = run_tests;
 	props.data = NULL;

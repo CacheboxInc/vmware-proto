@@ -87,6 +87,9 @@ void bufpool_deinit(bufpool_t *bp)
 		/* block deinit until last buffer is freed */
 		vmk_WorldWait((vmk_WorldEventID) &bp->issued, bp->lock,
 			100 * VMK_MSEC_PER_SEC, "bufpool_deinit: blocked.\n");
+
+		rc = pthread_mutex_lock(bp->lock);
+		assert(rc == 0);
 	}
 	assert(bp->issued == 0);
 
@@ -155,7 +158,10 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 
 		while (bp->issued >= bp->nmax) {
 			vmk_WorldWait((vmk_WorldEventID) &bp->issued, bp->lock,
-				30 * VMK_MSEC_PER_SEC, "bufpool_get: blocked.\n");
+					300 * VMK_MSEC_PER_SEC, "bufpool_get: blocked.\n");
+
+			rc = pthread_mutex_lock(bp->lock);
+			assert(rc == 0);
 		}
 	}
 
@@ -231,9 +237,9 @@ void bufpool_put(bufpool_t *bp, char *buf)
 		assert(bp->owned >= bp->nbufs);
 	}
 
-	vmk_WorldWakeup((vmk_WorldEventID) &bp->issued);
-
 	pthread_mutex_unlock(bp->lock);
+
+	vmk_WorldWakeup((vmk_WorldEventID) &bp->issued);
 }
 
 #ifdef SOLOTEST_BUFPOOL

@@ -10,34 +10,31 @@ VMK_ReturnStatus _worker_thread(void *args)
 	work_t        *w;
 
 	while (1) {
+		vmk_WarningMessage("%s taking lock.\n", __func__);
 		rc = pthread_mutex_lock(tp->work_lock);
 		assert(rc == 0);
 
 		if (DLL_ISEMPTY(&tp->work_list)) {
-			/* block */
 			if (tp->state == TP_SHUTTING) {
+				tp->active--;
+				pthread_mutex_unlock(tp->work_lock);
 				break;
 			}
 
+			/* block */
 			rc = vmk_WorldWait((vmk_WorldEventID) &tp->work_pend,
 					tp->work_lock, VMK_TIMEOUT_UNLIMITED_MS,
 					"_worker_thread blocked.\n");
 
 			assert(rc == VMK_OK);
-
-			if (DLL_ISEMPTY(&tp->work_list)) {
-				if (tp->state == TP_SHUTTING) {
-					break;
-				}
-				pthread_mutex_unlock(tp->work_lock);
-				continue;
-			}
+			continue;
 		}
 
 		/* get next work */
 		assert(!DLL_ISEMPTY(&tp->work_list));
 		f = DLL_NEXT(&tp->work_list);
 		DLL_REM(f);
+		tp->work_pend--;
 		pthread_mutex_unlock(tp->work_lock);
 
 		/* work on it */
@@ -48,8 +45,7 @@ VMK_ReturnStatus _worker_thread(void *args)
 		bufpool_put(&tp->pool, (char *) w);
 	}
 
-	tp->active--;
-	pthread_mutex_unlock(tp->work_lock);
+	vmk_WarningMessage("%s unlocking spin lock.\n", __func__);
 	return VMK_OK;
 }
 
@@ -65,23 +61,28 @@ void _thread_pool_deinit(thread_pool_t *tp)
 
 		tp->state = TP_SHUTTING;
 
-		rc = vmk_WorldWakeup((vmk_WorldEventID) &tp->work_pend);
-		assert(rc == VMK_OK);
-
 		rc = pthread_mutex_unlock(tp->work_lock);
 		assert(rc == 0);
 
+		vmk_WarningMessage("%s waking up waiting worlds.\n", __func__);
+
+		rc = vmk_WorldWakeup((vmk_WorldEventID) &tp->work_pend);
+		assert(rc == VMK_OK);
+
+		vmk_WarningMessage("%s done waking up waiting worlds.\n", __func__);
 		for (i = 0; i < tp->nthreads; i++) {
 			h = &tp->threads[i];
 			if (h == NULL) {
 				break;
 			}
 
+		vmk_WarningMessage("%s calling pthread_join.\n", __func__);
 			(void) pthread_join(*h, NULL);
 		}
 		free(tp->heap_id, tp->threads);
 	}
 
+		vmk_WarningMessage("%s all worlds ended. almost finished.\n", __func__);
 	assert(tp->active == 0);
 	assert(DLL_ISEMPTY(&tp->work_list));
 
@@ -188,8 +189,9 @@ int schedule_work(thread_pool_t *tp, work_t *w)
 
 	pthread_mutex_lock(tp->work_lock);
 	DLL_REVADD(&tp->work_list, &w->list);
-	vmk_WorldWakeup((vmk_WorldEventID) &tp->work_pend);
+	tp->work_pend++;
 	pthread_mutex_unlock(tp->work_lock);
 
+	vmk_WorldWakeup((vmk_WorldEventID) &tp->work_pend);
 	return 0;
 }

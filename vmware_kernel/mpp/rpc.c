@@ -174,7 +174,7 @@ static inline void _rpc_chan_deinit(rpc_chan_t *rcp)
 	bufpool_deinit(&rcp->ploadpool);
 	bufpool_deinit(&rcp->msgpool);
 	hash_deinit(&rcp->hash);
-	pthread_mutex_destroy(rcp->lock);
+	vmk_SemaDestroy(&rcp->lock);
 	vmware_socket_sys_deinit();
 	memset(rcp, 0, sizeof(*rcp));
 }
@@ -242,7 +242,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 		goto error;
 	}
 
-	rc = pthread_mutex_init(&rcp->lock, n, module);
+	rc = vmk_BinarySemaCreate(&rcp->lock, module->mod_id, n);
 	if (rc < 0) {
 		goto error;
 	}

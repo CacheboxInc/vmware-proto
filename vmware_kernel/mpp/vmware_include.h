@@ -180,4 +180,10 @@ static inline int pthread_join(vmk_WorldID wid, void *unused)
 	return 0;
 }
 
+static inline int pthread_cancel(pthread_t wid)
+{
+	vmk_WorldDestroy(wid);
+	return 0;
+}
+
 #endif // __VMWARE_INCLUDE__

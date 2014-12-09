@@ -15,17 +15,8 @@
 struct rpc_msg;
 typedef void (*rpchandler_t)(struct rpc_msg *);
 
-#define RPC_CHAN_LOCK(rcp) do {                 \
-	int _rc;                                \
-	_rc = pthread_mutex_lock(rcp->lock);    \
-	assert(_rc == 0);                       \
-} while(0)
-
-#define RPC_CHAN_UNLOCK(rcp) do {               \
-	int _rc;                                \
-	_rc = pthread_mutex_unlock(rcp->lock);  \
-	assert(_rc == 0);                       \
-} while (0)
+#define RPC_CHAN_LOCK(rcp)   vmk_SemaLock(&((rcp)->lock))
+#define RPC_CHAN_UNLOCK(rcp) vmk_SemaUnlock(&((rcp)->lock))
 
 typedef struct rpc_chan {
 	sock_handle_t   socket;
@@ -38,7 +29,7 @@ typedef struct rpc_chan {
 	rpchandler_t    req_handler;
 	rpchandler_t    resp_handler;
 	pthread_t       recv_thread;
-	pthread_mutex_t lock;
+	vmk_Semaphore   lock;
 } rpc_chan_t;
 
 /*
