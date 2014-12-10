@@ -9,13 +9,19 @@
  *
  ************************************************************/
 
+#define VMWARE
+
 #include "vmkapi.h"
 #include "vmkapi_socket.h"
 #include "vmkapi_socket_ip.h"
 #include "threadpool.h"
 #include "mgmtInterface.h"
+#include "vmware_include.h"
+#include "rpc.h"
+#include "network.h"
+#include "tst-rpc.h"
 
-VMK_ReturnStatus rpc_tests(void);
+VMK_ReturnStatus start_test_thread(void);
 
 // static VMK_ReturnStatus send_msg(void *);
 // VMK_ReturnStatus start_send_msg(void);
@@ -139,6 +145,12 @@ typedef enum {
    EXAMPLE_WORLD_STOPPING,
    EXAMPLE_WORLD_STOPPED,
 } ExampleWorldState;
+
+/*
+ * CACHEBOX VARIABLES
+ */
+static rpc_chan_t    rpc;
+static sock_handle_t sock = -1;
 
 // Forward declarations
 
@@ -1015,7 +1027,7 @@ Example_CompletePathCommand(vmk_ScsiCommand *cmd)
             break;
          }
       }
-      
+
       ExampleCompleteDeviceCommand(exCmd);
    } else { // Command failed
       ExamplePathFailureAction ExampleAction;
@@ -1129,84 +1141,299 @@ ExampleIssueFail(vmk_ScsiPath *path,
  *
  ***********************************************************************
  */
+
+void mpp_req_handler(rpc_msg_t *msgp)
+{
+	vmk_WarningMessage("%s ==>.\n", __func__);
+	if (RPC_IS_CONNCLOSED(msgp)) {
+		rpc_msg_put(msgp->rcp, msgp);
+		rpc_chan_close(msgp->rcp);
+		vmk_WorldWakeup((vmk_WorldEventID) &cond);
+		vmk_WarningMessage("%s <==.\n", __func__);
+		return;
+	}
+
+	assert(0);
+}
+
+static void set_cmd_complete(vmk_ScsiCommand *cmd, uint64_t len)
+{
+	vmk_ScsiCmdStatus *cs;
+
+	cs                = &cmd->status;
+	cs->device        = VMK_SCSI_DEVICE_GOOD;
+	cs->host          = VMK_SCSI_HOST_OK;
+	cs->plugin        = VMK_SCSI_PLUGIN_GOOD;
+
+	cmd->bytesXferred = len;
+}
+
+static int resp_read_cmd(rpc_chan_t *rcp, rpc_msg_t *m)
+{
+	rpc_msg_t         *resp_m;
+	read_cmd_t        *r;
+	ExampleCommand    *ex_cmd;
+	vmk_ScsiCommand   *cmd;
+	uint64_t          len;
+
+	assert(m->hdr.status == 0);
+
+	resp_m = m->resp;
+	r      = (read_cmd_t *) &m->hdr;
+	ex_cmd = m->opaque;
+	cmd    = ex_cmd->cmd;
+	len    = 0;
+
+	assert(vmk_SgGetDataLen(cmd->sgArray) == resp_m->hdr.payloadlen);
+	assert(r->len == resp_m->hdr.payloadlen);
+
+	if (resp_m->hdr.payloadlen != 0) {
+		assert(resp_m->payload != NULL);
+
+		p = resp->payload;
+		s = vmk_SgCopyFrom(cmd->sgArray, p, r->len);
+		assert(s == VMK_OK);
+		if (s != VMK_OK) {
+			/*
+			 * TODO
+			 */
+		}
+
+		len = r->len;
+	}
+	set_cmd_complete(cmd, len);
+	rpc_msg_put(rcp, msgp);
+
+	cmd->done(cmd);
+	return 0;
+}
+
+static int resp_write_cmd(rpc_chan_t *rcp, rpc_msg_t *m)
+{
+	rpc_msg_put(rcp, msgp);
+	return 0;
+}
+
+void mpp_resp_handler(rpc_msg_t *msgp)
+{
+	rpc_chan_t     *rcp;
+
+	vmk_WarningMessage("%s ==>\n", __func__);
+	rcp = msgp->rcp;
+
+	switch (RPC_GETMSGTYPE(msgp)) {
+		case RPC_READ_MSG:
+			resp_read_cmd(rcp, msgp);
+			break;
+		case RPC_WRITE_MSG:
+			resp_write_cmd(rcp, msgp);
+			break;
+		default:
+			assert(0);
+	}
+	vmk_WarningMessage("%s <==\n", __func__);
+}
+
+static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
+{
+	vmk_ScsiCommand  *cmd;
+	vmk_uint64       offset;
+	vmk_uint32       blocks;
+	uint64_t         len;
+	rpc_msg_t        *m;
+	vmk_ByteCount    bc;
+	read_cmd_t       *r;
+	int              rc;
+
+	cmd = ex_cmd->cmd;
+	vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
+			&offset, &blocks);
+
+	len = blocks * SECTOR_SIZE;
+	m   = NULL;
+	p   = NULL;
+
+	rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*m), &m);
+	assert(m != NULL);
+
+	bc        = vmk_SgGetDataLen(cmd->sgArray);
+	r         = (read_cmd_t *) &m->hdr;
+	r->offset = offset;
+	r->len    = len;
+	r->opaque = ex_cmd;
+
+	rc        = rpc_async_request(rcp, m);
+	if (rc < 0) {
+		goto error;
+	}
+	return VMK_OK;
+
+error:
+	if (m) {
+		rpc_msg_put(rcp, m);
+	}
+	return VMK_FAILURE;
+}
+
+static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd)
+{
+	vmk_ScsiCommand  *cmd;
+	vmk_uint64       offset;
+	vmk_uint32       blocks;
+	uint64_t         len;
+	rpc_msg_t        *m;
+	char             *p;
+	VMK_ReturnStatus s;
+	write_cmd_t      *w;
+	int              rc;
+
+	cmd = ex_cmd->cmd;
+	vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
+			&offset, &blocks);
+
+	len = blocks * SECTOR_SIZE;
+	m   = NULL;
+	p   = NULL;
+
+	rpc_msg_get(rcp, RPC_WRITE_MSG, sizeof(*m), &m);
+	assert(m != NULL);
+
+	if (blocks != 0) {
+		rpc_payload_get(rcp, , &p);
+		assert(p != NULL);
+
+		rpc_payload_set(rcp, m, p, bc);
+		assert(m->payload != NULL);
+		assert(m->hdr.payloadlen != 0);
+
+		s = vmk_SgCopyFrom(p, cmd->sgArray, bc);
+		if (s != VMK_OK) {
+			goto error;
+		}
+	}
+
+	w         = (write_cmd_t *) &m->hdr;
+	w->offset = offset;
+	w->len    = len;
+	w->opaque = ex_cmd;
+	rc        = rpc_async_request(rcp, m);
+	if (rc < 0) {
+		goto error;
+	}
+	return VMK_OK;
+
+error:
+	if (m) {
+		rpc_msg_put(rcp, m);
+	}
+	return VMK_FAILURE;
+
+}
+
+static inline VMK_ReturnStatus cachebox_rw_cmd(ExampleCommand *exCmd, rpc_chan_t *rcp)
+{
+	vmk_ScsiCommand  *cmd = exCmd->scsiCmd;
+	VMK_ReturnStatus rc;
+
+	if (cmd->isReadCdb) {
+		rc = read_cmd(exCmd, rcp);
+	} else if (cmd->isWriteCdb) {
+		rc = write_cmd(exCmd, rcp);
+	}
+
+	return rc;
+}
+
+static inline vmk_Bool is_rw_cmd(vmk_ScsiCommand *cmd)
+{
+	vmk_ScsiCommand *cmd = exCmd->scsiCmd;
+
+	return cmd->isReadCdb || cmd->isWriteCdb;
+}
+
 static void
 ExampleIssueCommand(vmk_ScsiDevice *scsiDev,
                     vmk_ScsiCommand *cmd,
                     ExampleCommand *exCmd)
 {
-   VMK_ReturnStatus status;
-   ExampleDevice *exDev = ExampleGetExDev(scsiDev);
-   ExamplePath *exPath;
+	VMK_ReturnStatus status;
+	ExampleDevice *exDev = ExampleGetExDev(scsiDev);
+	ExamplePath *exPath;
 
-   exCmd->exDev = exDev;
-   exCmd->scsiCmd = cmd;
-   exCmd->done = cmd->done;
-   exCmd->doneData = cmd->doneData;
+	exCmd->exDev = exDev;
+	exCmd->scsiCmd = cmd;
+	exCmd->done = cmd->done;
+	exCmd->doneData = cmd->doneData;
 
-   vmk_SpinlockLock(exDev->lock);
-   ASSERT_CMD_IS_UNLINKED(exCmd);
-   VMK_ASSERT(exDev->openCount > 0);
-   exDev->activeCmdCount++;
+	vmk_SpinlockLock(exDev->lock);
+	ASSERT_CMD_IS_UNLINKED(exCmd);
+	VMK_ASSERT(exDev->openCount > 0);
+	exDev->activeCmdCount++;
 
-   vmk_WarningMessage("Anup: Command issued to scsci path = %p\n", exCmd);
-   /*
-    * For a reservation sensitive IO we must check (again) to see if
-    * the device has a SCSI-2 reservation update in progress.
-    */
-   if (VMK_UNLIKELY(cmd->flags &
-                    VMK_SCSI_COMMAND_FLAGS_RESERVATION_SENSITIVE)) {
-      if (exDev->resvUpdateInProgress) {
-         /*
-          * Put the IO on the abortQueue as if it had been aborted by
-          * the reservation update. ExampleCompleteDeviceCommand() expects
-          * the reservation sensitive IO to always be queued.
-          */
-         vmk_ListInsert(&exCmd->links,
-                        vmk_ListAtRear(&exDev->resvSensitiveAbtQueue));
-         vmk_SpinlockUnlock(exDev->lock);
+	vmk_WarningMessage("Anup: Command issued to scsci path = %p\n", exCmd);
+	/*
+	 * For a reservation sensitive IO we must check (again) to see if
+	 * the device has a SCSI-2 reservation update in progress.
+	 */
+	if (VMK_UNLIKELY(cmd->flags &
+				VMK_SCSI_COMMAND_FLAGS_RESERVATION_SENSITIVE)) {
+		if (exDev->resvUpdateInProgress) {
+			/*
+			 * Put the IO on the abortQueue as if it had been aborted by
+			 * the reservation update. ExampleCompleteDeviceCommand() expects
+			 * the reservation sensitive IO to always be queued.
+			 */
+			vmk_ListInsert(&exCmd->links,
+					vmk_ListAtRear(&exDev->resvSensitiveAbtQueue));
+			vmk_SpinlockUnlock(exDev->lock);
 
-         vmk_Log(pluginLog, "Reservation update in progress "
-                      "for NMP device \"%s\".",
-                      vmk_ScsiGetDeviceName(exDev->device));
-         cmd->status.host = VMK_SCSI_HOST_RETRY;
-         cmd->status.plugin = VMK_SCSI_PLUGIN_RESERVATION_LOST;
-         ExampleCompleteDeviceCommand(exCmd);
+			vmk_Log(pluginLog, "Reservation update in progress "
+					"for NMP device \"%s\".",
+					vmk_ScsiGetDeviceName(exDev->device));
+			cmd->status.host = VMK_SCSI_HOST_RETRY;
+			cmd->status.plugin = VMK_SCSI_PLUGIN_RESERVATION_LOST;
+			ExampleCompleteDeviceCommand(exCmd);
 
-         return;
-      }
+			return;
+		}
 
-      vmk_ListInsert(&exCmd->links,
-                     vmk_ListAtRear(&exDev->resvSensitiveCmdQueue));
-   }   
+		vmk_ListInsert(&exCmd->links,
+				vmk_ListAtRear(&exDev->resvSensitiveCmdQueue));
+	}
 
-   cmd->done = Example_CompletePathCommand;
-   cmd->doneData = exCmd;
+	cmd->done = Example_CompletePathCommand;
+	cmd->doneData = exCmd;
 
-   exCmd->scsiPath = exDev->paths[exDev->activePathIndex];
-   exPath = ExampleGetExPath(exCmd->scsiPath);
-   vmk_SpinlockLock(exPath->lock);
-   exPath->activeCmdCount++;
-   if (cmd->cdb[0] == VMK_SCSI_CMD_RESERVE_UNIT) {
-      exDev->resInfo.pendingReserves++;
-      if (!(exDev->flags & EXAMPLE_DEVICE_RESERVED)) {
-         exDev->flags |= EXAMPLE_DEVICE_RESERVING;
-         exDev->resInfo.resPath = exPath;
-      }
-   }
-   /*
-    * Take a ref on path that will be decremented when command completes
-    * in Example_CompletePathCommand(). This is done to prevent the path
-    * from being unclaimed while I/O is in progress on the path.
-    */
-   ExamplePathIncRefCount(exPath, VMK_TRUE);
-   vmk_SpinlockUnlock(exPath->lock);
+	exCmd->scsiPath = exDev->paths[exDev->activePathIndex];
+	exPath = ExampleGetExPath(exCmd->scsiPath);
+	vmk_SpinlockLock(exPath->lock);
+	exPath->activeCmdCount++;
+	if (cmd->cdb[0] == VMK_SCSI_CMD_RESERVE_UNIT) {
+		exDev->resInfo.pendingReserves++;
+		if (!(exDev->flags & EXAMPLE_DEVICE_RESERVED)) {
+			exDev->flags |= EXAMPLE_DEVICE_RESERVING;
+			exDev->resInfo.resPath = exPath;
+		}
+	}
+	/*
+	 * Take a ref on path that will be decremented when command completes
+	 * in Example_CompletePathCommand(). This is done to prevent the path
+	 * from being unclaimed while I/O is in progress on the path.
+	 */
+	ExamplePathIncRefCount(exPath, VMK_TRUE);
+	vmk_SpinlockUnlock(exPath->lock);
 
-   vmk_SpinlockUnlock(exDev->lock);
+	vmk_SpinlockUnlock(exDev->lock);
 
-   status = vmk_ScsiIssueAsyncPathCommandDirect(exCmd->scsiPath, cmd);
-   if (status != VMK_OK) {
-      ExampleIssueFail(exCmd->scsiPath, cmd, status);
-   }
+	rc = is_rw_cmd(cmd);
+	if (rc == VMK_FALSE) {
+		status = vmk_ScsiIssueAsyncPathCommandDirect(exCmd->scsiPath, cmd);
+	} else {
+		status = cachebox_rw_cmd(exCmd, &rpc);
+	}
+	if (status != VMK_OK) {
+		ExampleIssueFail(exCmd->scsiPath, cmd, status);
+	}
 }
 
 /*
@@ -1445,75 +1672,75 @@ ExampleDeviceSchedStart(ExampleDevice *exDev,
 static VMK_ReturnStatus
 ExampleDeviceStartCommand(vmk_ScsiDevice *scsiDev)
 {
-   vmk_WorldID currentWorld = VMK_INVALID_WORLD_ID;
-   vmk_ServiceTimeContext ioAcctCtx = VMK_SERVICE_TIME_CONTEXT_NONE;
-   ExampleDevice *exDev = ExampleGetExDev(scsiDev);
+	vmk_WorldID currentWorld = VMK_INVALID_WORLD_ID;
+	vmk_ServiceTimeContext ioAcctCtx = VMK_SERVICE_TIME_CONTEXT_NONE;
+	ExampleDevice *exDev = ExampleGetExDev(scsiDev);
 
-   do {
-      vmk_ScsiCommand *cmd;
-      ExampleCommand  *exCmd;
+	do {
+		vmk_ScsiCommand *cmd;
+		ExampleCommand  *exCmd;
 
-      if (VMK_UNLIKELY(ExampleDevice_IsBlocked(exDev))) {
-         /*
-          * The retry world is retrying the failover IOs.
-          * It will unblock the device once it is done
-          * sending all the failover IOs.
-          * Note : The device can be blocked after this 
-          *        check which will result in IOs being 
-          *        sent on a blocked device. This is not
-          *        a problem as "ordered command delivery"
-          *        is best-effort. 
-          */
-         vmk_Warning(pluginLog,
-                     "Example Device \"%s\" is blocked. "
-                     "Not starting I/O from device.",
-                     vmk_ScsiGetDeviceName(exDev->device));
-         break;
-      }
+		if (VMK_UNLIKELY(ExampleDevice_IsBlocked(exDev))) {
+			/*
+			 * The retry world is retrying the failover IOs.
+			 * It will unblock the device once it is done
+			 * sending all the failover IOs.
+			 * Note : The device can be blocked after this 
+			 *        check which will result in IOs being 
+			 *        sent on a blocked device. This is not
+			 *        a problem as "ordered command delivery"
+			 *        is best-effort. 
+			 */
+			vmk_Warning(pluginLog,
+					"Example Device \"%s\" is blocked. "
+					"Not starting I/O from device.",
+					vmk_ScsiGetDeviceName(exDev->device));
+			break;
+		}
 
-      exCmd = ExampleAllocateExCommand();
-      if (exCmd == NULL) {
-         vmk_Warning(pluginLog, "Could not allocate command.");
-         ExampleDeviceSchedStart(exDev, EXAMPLE_CMD_TRANSIENT_WAIT_US);
-         break;
-      }
+		exCmd = ExampleAllocateExCommand();
+		if (exCmd == NULL) {
+			vmk_Warning(pluginLog, "Could not allocate command.");
+			ExampleDeviceSchedStart(exDev, EXAMPLE_CMD_TRANSIENT_WAIT_US);
+			break;
+		}
 
-      cmd = vmk_ScsiGetNextDeviceCommand(scsiDev);
-      if (cmd == NULL) {
-         ExampleFreeExCommand(exCmd);
-         break;
-      }
+		cmd = vmk_ScsiGetNextDeviceCommand(scsiDev);
+		if (cmd == NULL) {
+			ExampleFreeExCommand(exCmd);
+			break;
+		}
 
-      /*
-       * Once the removing flag is set, no IO should be issued from
-       * higher layers, because we ensure openCount == 0 before
-       * setting the flag and we fail opens after setting this flag.
-       *
-       * Note that this function can still be called by a leftover
-       * timer callback.
-       */
-      VMK_ASSERT(!(exDev->flags & EXAMPLE_DEVICE_REMOVING));
+		/*
+		 * Once the removing flag is set, no IO should be issued from
+		 * higher layers, because we ensure openCount == 0 before
+		 * setting the flag and we fail opens after setting this flag.
+		 *
+		 * Note that this function can still be called by a leftover
+		 * timer callback.
+		 */
+		VMK_ASSERT(!(exDev->flags & EXAMPLE_DEVICE_REMOVING));
 
-      /*
-       * Track how many CPU cycles are spent processing IOs on behalf
-       * of each world.  CPU Accounting changes are somewhat
-       * expensive. Switch ioAcctCtx only if starting to issue IO for
-       * a different world.
-       */
-      if (currentWorld != cmd->worldId) {
-         vmk_ServiceTimeChargeEndWorld(ioAcctCtx);
-         currentWorld = cmd->worldId;
-         ioAcctCtx = vmk_ServiceTimeChargeBeginWorld(ScsiIoAccountingId,
-                                                     currentWorld);
-      }
+		/*
+		 * Track how many CPU cycles are spent processing IOs on behalf
+		 * of each world.  CPU Accounting changes are somewhat
+		 * expensive. Switch ioAcctCtx only if starting to issue IO for
+		 * a different world.
+		 */
+		if (currentWorld != cmd->worldId) {
+			vmk_ServiceTimeChargeEndWorld(ioAcctCtx);
+			currentWorld = cmd->worldId;
+			ioAcctCtx = vmk_ServiceTimeChargeBeginWorld(ScsiIoAccountingId,
+					currentWorld);
+		}
 
-      ExampleIssueCommand(scsiDev, cmd, exCmd);
-   } while (1);
+		ExampleIssueCommand(scsiDev, cmd, exCmd);
+	} while (1);
 
-   /* Stop CPU accounting */
-   vmk_ServiceTimeChargeEndWorld(ioAcctCtx);
+	/* Stop CPU accounting */
+	vmk_ServiceTimeChargeEndWorld(ioAcctCtx);
 
-   return VMK_OK;
+	return VMK_OK;
 }
 
 /*
@@ -4032,6 +4259,46 @@ ExamplePluginStateLogger(struct vmk_ScsiPlugin *plugin,
  *
  ************************************************************/
 
+static inline void deinit_cachebox(void)
+{
+	rpc_chan_close(&rpc);
+	rpc_chan_deinit(&rpc);
+}
+
+static inline VMK_ReturnStatus init_cachebox(void)
+{
+	module_global_t module;
+	int             rc;
+
+	_module_struct_init(&module);
+
+	rc = vmware_socket_sys_init(EXAMPLE_NAME, &module);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
+	rc = client_setup(SIP, strlen(SIP), SPORT, CIP, strlen(CIP), CPORT, &sock);
+	if (rc < 0) {
+		vmk_WarningMessage("client setup failed.\n");
+		goto error;
+	}
+
+	rc = rpc_chan_init(&rpc, &module, sock, IODEPTH, 4, sizeof(rpc_maxmsg_t), IODEPTH * 2, cb_mpp_req_handler, cb_mpp_resp_handler);
+	if (rc < 0) {
+		vmk_WarningMessage("rpc_chan_init failed.\n");
+		goto error;
+	}
+
+	return VMK_OK;
+
+error:
+	vmware_socket_sys_deinit();
+	if (sock != -1) {
+		socket_close(sock);
+	}
+	return VMK_FAILURE;
+}
+
 /*
  ***********************************************************************
  * init_module --                                                 */ /**
@@ -4270,44 +4537,34 @@ init_module(void)
 
    pluginRegistered = VMK_TRUE;
 
-#if 0
-   status = vmk_MgmtInit(moduleID,
-                        miscHeap,
-                        &mgmtSig,
-                        NULL,
-                        0, // Not using a cookie here
-                        &mgmtHandle);
+   status = init_cachebox();
    if (status != VMK_OK) {
-	vmk_WarningMessage("Anup: vmk_MgmtInit Failed\n");
-        goto error;
+       goto error;
    }
-     
-   vmk_WarningMessage("Anup: vmk_MgmtInit Success*********\n");
-#endif
+
+   cachebox_initized = VMK_TRUE;
 
    /* Enable the plugin */
    status = ExampleStartPlugin();
-   if (status == VMK_OK) {
-      /* Anup: Calling Callback in userworld
-      Callback(0);
-	*/
-#if 0
-      if (VMK_OK != send_msg(NULL)) {
-	vmk_WarningMessage("Anup: send_msg() failed\n");
-	goto error;
-      }
-#endif
+   if (status != VMK_OK) {
+      vmk_Warning(pluginLog, "ExampleStartPlugin failed.");
+      goto error;
+   }
+
+#if 0	  
       /* Test for threapool */
-      if (VMK_OK != rpc_tests()) {
+      if (VMK_OK != start_test_thread()) {
 	      vmk_WarningMessage("rpc_test failed");
 	      goto error;
       }
+#endif
+
 
       return 0;
-   }
-
-   vmk_Warning(pluginLog, "ExampleStartPlugin failed.");
 error:
+   if (cachebox_initized) {
+   	deinit_cachebox();
+   }
    if (pluginRegistered) {
       vmk_ScsiSetPluginState(plugin, VMK_SCSI_PLUGIN_STATE_DISABLED);
       vmk_ScsiUnregisterPlugin(plugin);
@@ -4440,7 +4697,7 @@ cleanup_module(void)
 
 static inline _module_struct_init(module_global_t *module)
 {
-	module->module   = EXAMPLE_NAME;
+	module->module   = EXAMPLE_SHORT_NAME;
 	module->mod_id   = moduleID;
 	module->heap_id  = miscHeap;
 	module->lockd_id = lockDomain;
@@ -4594,13 +4851,13 @@ VMK_ReturnStatus threadpool_test(void)
 
 	_module_struct_init(&module);
 
-	rc = thread_pool_init(&tp, "test", &module, 10);
+	rc = thread_pool_init(&tp, "test", &module, 32);
 	if (rc < 0) {
 		vmk_WarningMessage("thread_pool_init failed");
 		return VMK_FAILURE;
 	}
 
-	for (i = 0; i < 1000; i++) {
+	for (i = 0; i < 10000; i++) {
 		w          = new_work(&tp);
 		w->data    = vmk_HeapAlloc(miscHeap, 100);
 		w->work_fn = do_work;
@@ -4621,10 +4878,169 @@ err:
 	return VMK_FAILURE;
 }
 
+static inline int strlen(const char *s)
+{
+	int i;
+
+	i = 0;
+	while (*s) {
+		s++;
+		i++;
+	}
+
+	return i;
+}
+
+static int cond;
+
+void mpp_req_handler(rpc_msg_t *msgp)
+{
+	vmk_WarningMessage("%s ==>.\n", __func__);
+	if (RPC_IS_CONNCLOSED(msgp)) {
+		rpc_msg_put(msgp->rcp, msgp);
+		rpc_chan_close(msgp->rcp);
+		vmk_WorldWakeup((vmk_WorldEventID) &cond);
+		vmk_WarningMessage("%s <==.\n", __func__);
+		return;
+	}
+
+	assert(0);
+}
+
+void mpp_resp_handler(rpc_msg_t *msgp)
+{
+	rpc_chan_t *rcp;
+//	vmk_Scsi_t *s;
+	uint64_t   r;
+
+	vmk_WarningMessage("%s ==>\n", __func__);
+	rcp = msgp->rcp;
+
+	switch (RPC_GETMSGTYPE(msgp)) {
+		case RPC_READ_MSG:
+//			s = msgp->opaque;
+//			assert(s->len == msgp->hdr.payloadlen);
+//			free(s);
+			rpc_msg_put(rcp, msgp);
+			break;
+		case RPC_WRITE_MSG:
+//			s = msgp->opaque;
+//			assert(s->len == msgp->hdr.payloadlen);
+//			free(s);
+			rpc_msg_put(rcp, msgp);
+			break;
+		default:
+			assert(0);
+	}
+	vmk_WarningMessage("%s <==\n", __func__);
+}
+
+static VMK_ReturnStatus send_msgs(void *args)
+{
+	rpc_chan_t *rcp = args;
+	uint64_t   i;
+//	vmk_Scsi_t *s;
+	rpc_msg_t  *m;
+	int        rc;
+	char       *p;
+
+	for (i = 0; i < 10000; i++) {
+		m = NULL;
+		rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*m), &m);
+		assert(m != NULL);
+		//m->opaque = s;
+
+		rpc_payload_get(rcp, 4096, &p);
+		rpc_payload_set(rcp, m, p, 4096);
+
+		rc = rpc_async_request(rcp, m);
+		assert(rc == 0);
+
+		vmk_WarningMessage("%s: sent msg %lu\n", __func__, i);
+	}
+
+	for (i = 0; i < 100; i++) {
+		vmk_WarningMessage("%s waiting for msgs to complete\n", __func__);
+		rc = vmk_WorldWait((vmk_WorldEventID) &cond, VMK_LOCK_INVALID,
+				VMK_MSEC_PER_SEC, "mazhi marji.");
+
+		if (rc == VMK_OK) {
+			break;
+		} else if (rc == VMK_TIMEOUT) {
+			continue;
+		} else {
+			assert(0);
+		}
+	}
+
+	assert(i < 100);
+
+	vmk_WarningMessage("%s closing rpc channel\n", __func__);
+	rpc_chan_close(rcp);
+
+	vmk_WarningMessage("%s rpc channel closed\n", __func__);
+	return VMK_OK;
+}
+
+VMK_ReturnStatus rpc_test(void)
+{
+	module_global_t module;
+	rpc_chan_t      rpc;
+	int             rc;
+	sock_handle_t   sock;
+	pthread_t       thread;
+	vmk_Bool        rpc_initialized = VMK_FALSE;
+	vmk_Bool        sock_initialized = VMK_FALSE;
+
+	_module_struct_init(&module);
+
+	rc = vmware_socket_sys_init(EXAMPLE_NAME, &module);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
+	rc = client_setup(SIP, strlen(SIP), SPORT, CIP, strlen(CIP), CPORT, &sock);
+	if (rc < 0) {
+		vmk_WarningMessage("client setup failed.\n");
+		goto error;
+	}
+	sock_initialized = VMK_TRUE;
+
+	rc = rpc_chan_init(&rpc, &module, sock, IODEPTH, 4, sizeof(rpc_maxmsg_t), IODEPTH * 2, mpp_req_handler, mpp_resp_handler);
+	if (rc < 0) {
+		vmk_WarningMessage("rpc_chan_init failed.\n");
+		goto error;
+	}
+
+	rpc_initialized = VMK_TRUE;
+
+	rc = pthread_create(&thread, module.module, &module, send_msgs, &rpc);
+	if (rc < 0) {
+		vmk_WarningMessage("pthread_create failed.\n");
+		goto error;
+	}
+
+	rc = pthread_join(thread, NULL);
+	assert(rc == 0);
+
+	rpc_chan_deinit(&rpc);
+	return VMK_OK;
+
+error:
+	if (rpc_initialized == VMK_TRUE) {
+		rpc_chan_deinit(&rpc);
+	}
+	if (sock_initialized == VMK_TRUE) {
+		socket_close(sock);
+	}
+	vmware_socket_sys_deinit();
+	return VMK_FAILURE;
+}
+
 VMK_ReturnStatus run_tests(void *data)
 {
 	VMK_ReturnStatus rc;
-
+#if 0
 	vmk_WarningMessage("Running pthred_mutex test\n");
 	rc = pthread_mutex_test();
 	if (rc != VMK_OK) {
@@ -4648,6 +5064,15 @@ VMK_ReturnStatus run_tests(void *data)
 		goto error;
 	}
 	vmk_WarningMessage("ThreadPool test: PASSED.\n");
+#endif
+
+	vmk_WarningMessage("Running RPC test.\n");
+	rc = rpc_test();
+	if (rc != VMK_OK) {
+		vmk_WarningMessage("RPC test: FAILED.\n");
+		goto error;
+	}
+	vmk_WarningMessage("RPC test: PASSED.\n");
 
 	return VMK_OK;
 
@@ -4655,7 +5080,7 @@ error:
 	return VMK_FAILURE;
 }
 
-VMK_ReturnStatus rpc_tests(void)
+VMK_ReturnStatus start_test_thread(void)
 {
 	/* 1. start main work creating  thread
 	   2. inside this thread, create thread pool

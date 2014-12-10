@@ -52,8 +52,13 @@ static inline vmware_socket_t *vmware_socket_find_free(void)
 	int             i;
 	vmware_socket_t *vs;
 
+	assert(vmw_socks != NULL);
+
 	for (i = 0; i < MAX_SOCKETS; i++) {
 		vs = &vmw_socks[i];
+		if (vs == NULL) {
+			return NULL;
+		}
 		if (vs->enabled == 0) {
 			vs->handle  = i;
 			vs->enabled = 0;
@@ -71,6 +76,8 @@ static inline void vmware_socket_free(vmware_socket_t *vs)
 
 static inline vmware_socket_t *vmware_socket_get(sock_handle_t h)
 {
+	assert(vmw_socks != NULL);
+
 	if (h < 0 || h > MAX_SOCKETS) {
 		return NULL;
 	}
@@ -85,6 +92,7 @@ static sock_handle_t socket(int domain, int type, int protocol)
 
 	vs = vmware_socket_find_free();
 	if (vs == NULL) {
+		vmk_WarningMessage("%s: vmware_socket_find_free failed\n", __func__);
 		return -1;
 	}
 	assert(vs->handle > 0 && vs->handle < MAX_SOCKETS);
@@ -92,10 +100,12 @@ static sock_handle_t socket(int domain, int type, int protocol)
 	rc = vmk_SocketCreate(domain, type, protocol, &vs->sock);
 	if (rc != VMK_OK) {
 		vmware_socket_free(vs);
+		vmk_WarningMessage("%s: vmk_SocketCreate failed\n", __func__);
 		return -1;
 	}
 
 	vs->enabled = 1;
+	vmk_WarningMessage("%s: socket created.\n", __func__);
 	return vs->handle;
 }
 
@@ -110,16 +120,19 @@ int bind(sock_handle_t handle, sockaddr_t *addr, socklen_t len)
 	VMK_ReturnStatus rc;
 
 	if (handle < 0 || handle > MAX_SOCKETS) {
+		vmk_WarningMessage("%s: incorrect handle\n", __func__);
 		return -1;
 	}
 
 	vs = vmware_socket_get(handle);
 	if (vs == NULL) {
+		vmk_WarningMessage("%s: vmware_socket_get failed\n", __func__);
 		return -1;
 	}
 
 	rc = vmk_SocketBind(vs->sock, addr, len);
 	if (rc != VMK_OK) {
+		vmk_WarningMessage("%s: vmk_SocketBind failed\n", __func__);
 		return -1;
 	}
 
@@ -156,16 +169,19 @@ int connect(sock_handle_t handle, sockaddr_t *addr, socklen_t len)
 	VMK_ReturnStatus rc;
 
 	if (handle < 0 || handle > MAX_SOCKETS) {
+		vmk_WarningMessage("%s: incorrect handle\n", __func__);
 		return -1;
 	}
 
 	vs = vmware_socket_get(handle);
 	if (vs == NULL) {
+		vmk_WarningMessage("%s: vmware_socket_get failed\n", __func__);
 		return -1;
 	}
 
 	rc = vmk_SocketConnect(vs->sock, addr, len);
 	if (rc != VMK_OK) {
+		vmk_WarningMessage("%s: vmk_SocketConnect failed\n", __func__);
 		return -1;
 	}
 
@@ -324,30 +340,36 @@ int client_setup(char *dip, int dip_len, int dport, char *sip, int sip_len,
 	*handle = -1;
 	sh      = socket_create(VMK_SOCKET_AF_INET, VMK_SOCKET_SOCK_STREAM, 0);
 	if (sh < 0) {
+		vmk_WarningMessage("socket_create failed.\n");
 		return -1;
 	}
 
 	rc = sockaddr_fill(&sa, VMK_SOCKET_AF_INET, sport, sip, sip_len);
 	if (rc < 0) {
+		vmk_WarningMessage("1 sockaddr_fill failed.\n");
 		goto error;
 	}
 
 	rc = socket_bind(sh, (sockaddr_t *) &sa, sizeof(sa));
 	if (rc < 0) {
+		vmk_WarningMessage("socket_bind failed.\n");
 		goto error;
 	}
 
 	rc = sockaddr_fill(&da, VMK_SOCKET_AF_INET, dport, dip, dip_len);
 	if (rc < 0) {
+		vmk_WarningMessage("2 sockaddr_fill failed.\n");
 		goto error;
 	}
 
 	rc = socket_connect(sh, (sockaddr_t *) &da, sizeof(sa));
 	if (rc < 0) {
+		vmk_WarningMessage("socket_connect failed.\n");
 		goto error;
 	}
 
 	*handle = sh;
+	vmk_WarningMessage("%s <==\n", __func__);
 	return 0;
 
 error:

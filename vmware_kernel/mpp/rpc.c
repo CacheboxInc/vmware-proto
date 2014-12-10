@@ -145,6 +145,7 @@ static VMK_ReturnStatus rpc_recv_thread(void *args)
 		if (rc < 0) {
 			break;
 		}
+		vmk_WarningMessage("%s received\n", __func__);
 
 		w          = new_work(&rcp->tp);
 		w->data    = msgp;
@@ -195,18 +196,12 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 
 	assert(resp_handler != NULL);
 	assert(req_handler  != NULL);
+	memset(rcp, 0, sizeof(*rcp));
 
 	rc = vmware_name(n, module->module, "rpc", sizeof(n));
 	if (rc < 0) {
 		return -1;
 	}
-
-	rc = vmware_socket_sys_init(n, module);
-	if (rc < 0) {
-		return -1;
-	}
-
-	memset(rcp, 0, sizeof(*rcp));
 
 	nmsg      = nway + reserve;
 	nmsg_max  = nway * 3;
@@ -253,7 +248,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	rcp->enabled      = 1;
 	rcp->seqid        = 1;
 
-	rc = thread_pool_init(&rcp->tp, n, module, nway);
+	rc = thread_pool_init(&rcp->tp, n, module, 1);
 	if (rc < 0) {
 		goto error;
 	}

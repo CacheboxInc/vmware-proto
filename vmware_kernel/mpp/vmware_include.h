@@ -109,7 +109,7 @@ static inline int pthread_mutex_init(vmk_Lock *lock, char *name, module_global_t
 	VMK_ReturnStatus        rc;
 	int                     r;
 
-	r = vmware_name(n, name, "lock", sizeof(n));
+	r = vmware_name(n, name, "l", sizeof(n));
 	if (r < 0) {
 		return -1;
 	}

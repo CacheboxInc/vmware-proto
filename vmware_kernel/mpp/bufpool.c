@@ -24,7 +24,7 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 
 	BZERO(bp);
 
-	r = vmware_name(n, name, "bufpool", sizeof(n));
+	r = vmware_name(n, name, "bp", sizeof(n));
 	assert(r == 0);
 
 	if (bufsize < sizeof(dll_t)) {
@@ -33,6 +33,7 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 
 	r = vmware_heap_create(&bp->heap_id, n, module, nmax, bufsize);
 	if (r < 0) {
+		vmk_WarningMessage("%s vmware_heap_create failed\n", __func__);
 		return -1;
 	}
 
@@ -86,7 +87,7 @@ void bufpool_deinit(bufpool_t *bp)
 	while (bp->issued != 0) {
 		/* block deinit until last buffer is freed */
 		vmk_WorldWait((vmk_WorldEventID) &bp->issued, bp->lock,
-			100 * VMK_MSEC_PER_SEC, "bufpool_deinit: blocked.\n");
+			VMK_MSEC_PER_SEC, "bufpool_deinit: blocked.\n");
 
 		rc = pthread_mutex_lock(bp->lock);
 		assert(rc == 0);
@@ -156,9 +157,9 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 			}
 		}
 
-		while (bp->issued >= bp->nmax) {
+		while ((bp->issued + bp->reserve) >= bp->nmax) {
 			vmk_WorldWait((vmk_WorldEventID) &bp->issued, bp->lock,
-					300 * VMK_MSEC_PER_SEC, "bufpool_get: blocked.\n");
+					10, "bufpool_get: blocked.\n");
 
 			rc = pthread_mutex_lock(bp->lock);
 			assert(rc == 0);

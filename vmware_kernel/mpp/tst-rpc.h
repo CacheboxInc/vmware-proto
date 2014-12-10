@@ -5,8 +5,9 @@
 
 #define IODEPTH 32
 
-#define IP    "127.0.0.1"
+#define SIP   "192.168.2.15"
 #define SPORT 45678
+#define CIP   "192.168.2.32"
 #define CPORT (SPORT + 1)
 
 enum {
@@ -17,14 +18,14 @@ enum {
 
 typedef struct read_cmd {
 	rpc_msghdr_t hdr;
-	int          cdb[16];
-	ssize_t      len;
+	uint64_t     offset;
+	uint64_t     len;
 } read_cmd_t;
 
 typedef struct write_cmd {
 	rpc_msghdr_t hdr;
-	int          cdb[16];
-	ssize_t      len;
+	uint64_t     offset;
+	uint64_t     len;
 } write_cmd_t;
 
 typedef union {

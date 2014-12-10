@@ -9,7 +9,6 @@ static const int MAX_BACKLOG = 16;
 typedef int sock_handle_t;
 typedef vmk_int32 ssize_t;
 
-
 typedef struct   vmk_SocketAddress   sockaddr_t;
 typedef struct   vmk_SocketIPAddress sockaddr_in_t;
 typedef vmk_uint8                      sa_family_t;

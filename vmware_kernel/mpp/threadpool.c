@@ -106,7 +106,7 @@ int thread_pool_init(thread_pool_t *tp, const char *name,
 
 	memset(tp, 0, sizeof(*tp));
 
-	rc = vmware_name(n, name, "threadpool", sizeof(n));
+	rc = vmware_name(n, name, "tp", sizeof(n));
 	assert(rc == 0);
 
 	rc = vmware_heap_create(&tp->heap_id, n, module, nthreads,
@@ -115,23 +115,26 @@ int thread_pool_init(thread_pool_t *tp, const char *name,
 		return -1;
 	}
 
-	nwork     = nthreads;
-	nwork_max = nthreads * 4;
+	nwork     = 32;
+	nwork_max = nwork * 4;
 
 	rc = bufpool_init(&tp->pool, n, module, sizeof(struct work), nwork,
 			nwork_max);
 	if (rc < 0) {
+		vmk_WarningMessage("%s 1 bufpool_init: failed\n", __func__);
 		goto error;
 	}
 
 	/* init locks */
 	rc = pthread_mutex_init(&tp->work_lock, n, module);
 	if (rc < 0) {
+		vmk_WarningMessage("%s: pthread_mutex_init failed\n", __func__);
 		goto error;
 	}
 
 	tp->threads = calloc(tp->heap_id, nthreads, sizeof(*tp->threads));
 	if (tp->threads == NULL) {
+		vmk_WarningMessage("%s: calloc failed\n", __func__);
 		goto error;
 	}
 
@@ -139,13 +142,15 @@ int thread_pool_init(thread_pool_t *tp, const char *name,
 
 	for (i = 0; i < nthreads; i++) {
 		h  = &tp->threads[i];
-		rc = vmk_StringFormat(n1, sizeof(n1), NULL, "%s-%d", n, i);
+		rc = vmk_StringFormat(n1, sizeof(n1), NULL, "%s%d", n, i);
 		if (rc != VMK_OK) {
+			vmk_WarningMessage("%s: vmk_StringFormat failed\n", __func__);
 			goto error;
 		}
 
 		rc = pthread_create(h, n1, module, _worker_thread, tp);
 		if (rc < 0) {
+			vmk_WarningMessage("%s: pthread_create failed\n", __func__);
 			goto error;
 		}
 	}
