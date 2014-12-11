@@ -731,8 +731,6 @@ static void ExampleCompleteDeviceCommand(ExampleCommand *exCmd)
 	cmd->done = exCmd->done;
 	cmd->doneData = exCmd->doneData;
 
-	vmk_WarningMessage("Anup: Command complete issued = %p\n", exCmd);
-
 	if (vmk_ScsiCmdStatusIsCheck(cmd->status)) {
 		status = vmk_ScsiCmdGetSenseData(cmd, (vmk_ScsiSenseData *)&sense,
 				sizeof(sense));
@@ -1268,7 +1266,6 @@ static void cb_mpp_resp_handler(rpc_msg_t *msgp)
 {
 	rpc_chan_t     *rcp;
 
-	vmk_WarningMessage("%s ==>\n", __func__);
 	rcp = msgp->rcp;
 
 	switch (RPC_GETMSGTYPE(msgp)) {
@@ -1281,7 +1278,6 @@ static void cb_mpp_resp_handler(rpc_msg_t *msgp)
 		default:
 			assert(0);
 	}
-	vmk_WarningMessage("%s <==\n", __func__);
 }
 
 static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
@@ -1418,7 +1414,6 @@ ExampleIssueCommand(vmk_ScsiDevice *scsiDev,
 	VMK_ASSERT(exDev->openCount > 0);
 	exDev->activeCmdCount++;
 
-	vmk_WarningMessage("Anup: Command issued to scsci path = %p\n", exCmd);
 	/*
 	 * For a reservation sensitive IO we must check (again) to see if
 	 * the device has a SCSI-2 reservation update in progress.

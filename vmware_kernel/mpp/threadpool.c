@@ -10,7 +10,6 @@ VMK_ReturnStatus _worker_thread(void *args)
 	work_t        *w;
 
 	while (1) {
-		vmk_WarningMessage("%s taking lock.\n", __func__);
 		rc = pthread_mutex_lock(tp->work_lock);
 		assert(rc == 0);
 
@@ -45,7 +44,6 @@ VMK_ReturnStatus _worker_thread(void *args)
 		bufpool_put(&tp->pool, (char *) w);
 	}
 
-	vmk_WarningMessage("%s unlocking spin lock.\n", __func__);
 	return VMK_OK;
 }
 

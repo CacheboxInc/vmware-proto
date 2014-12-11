@@ -145,7 +145,6 @@ static VMK_ReturnStatus rpc_recv_thread(void *args)
 		if (rc < 0) {
 			break;
 		}
-		vmk_WarningMessage("%s received\n", __func__);
 
 		w          = new_work(&rcp->tp);
 		w->data    = msgp;
@@ -248,7 +247,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	rcp->enabled      = 1;
 	rcp->seqid        = 1;
 
-	rc = thread_pool_init(&rcp->tp, n, module, 2);
+	rc = thread_pool_init(&rcp->tp, n, module, 16);
 	if (rc < 0) {
 		goto error;
 	}
