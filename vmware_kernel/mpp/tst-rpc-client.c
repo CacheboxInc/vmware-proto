@@ -89,13 +89,14 @@ void *send_msgs(void *args)
 	rpc_msg_t  *m;
 	int        rc;
 	char       *p;
+	read_cmd_t *r;
 
 	for (i = 0; i < 10000; i++) {
 		printf("sending msg: %lu\n", i);
 		s = new_scsi_command();
 
 		m = NULL;
-		rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*m), &m);
+		rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*r), &m);
 		assert(m != NULL);
 		m->opaque = s;
 

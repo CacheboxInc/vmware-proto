@@ -1253,7 +1253,7 @@ static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	m   = NULL;
 	p   = NULL;
 
-	rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*m), &m);
+	rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*r), &m);
 	assert(m != NULL);
 
 	bc        = vmk_SgGetDataLen(cmd->sgArray);
@@ -1295,7 +1295,7 @@ static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd)
 	m   = NULL;
 	p   = NULL;
 
-	rpc_msg_get(rcp, RPC_WRITE_MSG, sizeof(*m), &m);
+	rpc_msg_get(rcp, RPC_WRITE_MSG, sizeof(*w), &m);
 	assert(m != NULL);
 
 	if (blocks != 0) {
@@ -4943,10 +4943,11 @@ static VMK_ReturnStatus send_msgs(void *args)
 	rpc_msg_t  *m;
 	int        rc;
 	char       *p;
+	read_cmd_t *r;
 
 	for (i = 0; i < 10000; i++) {
 		m = NULL;
-		rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*m), &m);
+		rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*r), &m);
 		assert(m != NULL);
 		//m->opaque = s;
 
