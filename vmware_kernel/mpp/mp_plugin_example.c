@@ -23,6 +23,10 @@
 
 VMK_ReturnStatus start_test_thread(void);
 
+#define SECTOR_SHIFT             (9)
+#define SECTOR_SIZE              (1UL << SECTOR_SHIFT)
+#define SECTOR_TO_BYTES(sectors) ((sectors) << SECTOR_SHIFT)
+
 // static VMK_ReturnStatus send_msg(void *);
 // VMK_ReturnStatus start_send_msg(void);
 //void Callback(vmk_TimerCookie unusedData);
@@ -115,6 +119,11 @@ typedef struct ExampleDevice {
    vmk_ListLinks   resvSensitiveCmdQueue;  // d reservation sensitive command queue
    vmk_ListLinks   resvSensitiveAbtQueue;  // d reservation sensitive abort queue
    vmk_Bool        resvUpdateInProgress;   // d reservation update in progress
+
+   vmk_uint32      nouse;
+   vmk_WorldID     sc_world;
+   rpc_chan_t      *rpc;
+   vmk_Socket      sock;
 } ExampleDevice;
 
 // 'p' means field is protected by ExamplePath->lock
@@ -149,7 +158,7 @@ typedef enum {
 /*
  * CACHEBOX VARIABLES
  */
-static rpc_chan_t    rpc;
+rpc_chan_t           rpc;
 static sock_handle_t sock = -1;
 
 // Forward declarations
@@ -254,6 +263,27 @@ static inline char *
 ExampleDeviceGetName(ExampleDevice *exDev)
 {
    return exDev->deviceUid.id;
+}
+
+static inline _module_struct_init(module_global_t *module)
+{
+	module->module   = EXAMPLE_SHORT_NAME;
+	module->mod_id   = moduleID;
+	module->heap_id  = miscHeap;
+	module->lockd_id = lockDomain;
+}
+
+static inline int strlen(const char *s)
+{
+	int i;
+
+	i = 0;
+	while (*s) {
+		s++;
+		i++;
+	}
+
+	return i;
 }
 
 /*
@@ -690,64 +720,63 @@ ExampleFreeExCommand(ExampleCommand *exCmd)
  *
  ***********************************************************************
  */
-static void 
-ExampleCompleteDeviceCommand(ExampleCommand *exCmd)
+static void ExampleCompleteDeviceCommand(ExampleCommand *exCmd)
 {
-   vmk_ScsiCommand *cmd;
-   ExampleDevice *exDev = exCmd->exDev;
-   vmk_ScsiSenseDataSimple sense;
-   VMK_ReturnStatus status;
+	vmk_ScsiCommand *cmd;
+	ExampleDevice *exDev = exCmd->exDev;
+	vmk_ScsiSenseDataSimple sense;
+	VMK_ReturnStatus status;
 
-   cmd = exCmd->scsiCmd;
-   cmd->done = exCmd->done;
-   cmd->doneData = exCmd->doneData;
+	cmd = exCmd->scsiCmd;
+	cmd->done = exCmd->done;
+	cmd->doneData = exCmd->doneData;
 
-   vmk_WarningMessage("Anup: Command complete issued = %p\n", exCmd);
+	vmk_WarningMessage("Anup: Command complete issued = %p\n", exCmd);
 
-   if (vmk_ScsiCmdStatusIsCheck(cmd->status)) {
-      status = vmk_ScsiCmdGetSenseData(cmd, (vmk_ScsiSenseData *)&sense,
-                                       sizeof(sense));
-      if (status != VMK_OK) {
-         vmk_Log(pluginLog, "Get sense data failed, status %s",
-                 vmk_StatusToString(status));
-      } else if (vmk_ScsiCmdSenseIsPOR((vmk_ScsiSenseData *)&sense)) {
-         // reservation/release cycle may have broken
-         ExampleUpdateDevOnRel(exDev, VMK_TRUE);
-      }
-   }
+	if (vmk_ScsiCmdStatusIsCheck(cmd->status)) {
+		status = vmk_ScsiCmdGetSenseData(cmd, (vmk_ScsiSenseData *)&sense,
+				sizeof(sense));
+		if (status != VMK_OK) {
+			vmk_Log(pluginLog, "Get sense data failed, status %s",
+					vmk_StatusToString(status));
+		} else if (vmk_ScsiCmdSenseIsPOR((vmk_ScsiSenseData *)&sense)) {
+			// reservation/release cycle may have broken
+			ExampleUpdateDevOnRel(exDev, VMK_TRUE);
+		}
+	}
 
-   /*
-    * Reservation sensitive IO must be removed from the queue
-    * it is on, upon completion from Example plugin. Normally, 
-    * such IO's are on the resvSensitiveCmdQueue. But if they 
-    * are being aborted, they may have been moved to resvSensitiveAbtQueue. 
-    */
-   vmk_SpinlockLock(exDev->lock);
-   exDev->activeCmdCount--;
+	/*
+	 * Reservation sensitive IO must be removed from the queue
+	 * it is on, upon completion from Example plugin. Normally, 
+	 * such IO's are on the resvSensitiveCmdQueue. But if they 
+	 * are being aborted, they may have been moved to resvSensitiveAbtQueue. 
+	 */
+	vmk_SpinlockLock(exDev->lock);
+	exDev->activeCmdCount--;
 
-   if (VMK_UNLIKELY(cmd->flags &
-                    VMK_SCSI_COMMAND_FLAGS_RESERVATION_SENSITIVE)) {
-      vmk_ListRemove(&exCmd->links);
+	if (VMK_UNLIKELY(cmd->flags &
+				VMK_SCSI_COMMAND_FLAGS_RESERVATION_SENSITIVE)) {
+		vmk_ListRemove(&exCmd->links);
 
-      /*
-       * Wake up the reservation update thread upon completion of a
-       * reservation sensitive IO. In theory, we may have other
-       * reservation sensitive IOs outstanding on the device,
-       * but that is not common and we want to show some progress
-       * during reservation update.
-       */
-      if (exDev->resvUpdateInProgress) {
-         vmk_WorldWakeup((vmk_WorldEventID)&exDev->resvUpdateInProgress);
-      }
-   }
-   vmk_SpinlockUnlock(exDev->lock);
+		/*
+		 * Wake up the reservation update thread upon completion of a
+		 * reservation sensitive IO. In theory, we may have other
+		 * reservation sensitive IOs outstanding on the device,
+		 * but that is not common and we want to show some progress
+		 * during reservation update.
+		 */
+		if (exDev->resvUpdateInProgress) {
+			vmk_WorldWakeup((vmk_WorldEventID)&exDev->resvUpdateInProgress);
+		}
+	}
+	vmk_SpinlockUnlock(exDev->lock);
 
-   ExampleFreeExCommand(exCmd);
+	ExampleFreeExCommand(exCmd);
 
-   cmd->done(cmd);
+	cmd->done(cmd);
 
-   /* Get the next command(s) */
-   ExampleDeviceStartCommand(exDev->device);
+	vmk_WorldWakeup(exDev->nouse);
+	// ExampleDeviceStartCommand(exDev->device);
 }
 
 /*
@@ -1142,13 +1171,12 @@ ExampleIssueFail(vmk_ScsiPath *path,
  ***********************************************************************
  */
 
-void mpp_req_handler(rpc_msg_t *msgp)
+static void cb_mpp_req_handler(rpc_msg_t *msgp)
 {
 	vmk_WarningMessage("%s ==>.\n", __func__);
 	if (RPC_IS_CONNCLOSED(msgp)) {
 		rpc_msg_put(msgp->rcp, msgp);
 		rpc_chan_close(msgp->rcp);
-		vmk_WorldWakeup((vmk_WorldEventID) &cond);
 		vmk_WarningMessage("%s <==.\n", __func__);
 		return;
 	}
@@ -1170,39 +1198,39 @@ static void set_cmd_complete(vmk_ScsiCommand *cmd, uint64_t len)
 
 static int resp_read_cmd(rpc_chan_t *rcp, rpc_msg_t *m)
 {
-	rpc_msg_t         *resp_m;
+	rpc_msg_t         *resp;
 	read_cmd_t        *r;
 	ExampleCommand    *ex_cmd;
 	vmk_ScsiCommand   *cmd;
 	uint64_t          len;
+	char              *p;
+	VMK_ReturnStatus  s;
 
 	assert(m->hdr.status == 0);
 
-	resp_m = m->resp;
+	resp   = m->resp;
 	r      = (read_cmd_t *) &m->hdr;
 	ex_cmd = m->opaque;
-	cmd    = ex_cmd->cmd;
-	len    = 0;
+	cmd    = ex_cmd->scsiCmd;
+	len    = r->len;
 
-	assert(vmk_SgGetDataLen(cmd->sgArray) == resp_m->hdr.payloadlen);
-	assert(r->len == resp_m->hdr.payloadlen);
+	assert(vmk_SgGetDataLen(cmd->sgArray) == resp->hdr.payloadlen);
+	assert(r->len == resp->hdr.payloadlen);
 
-	if (resp_m->hdr.payloadlen != 0) {
-		assert(resp_m->payload != NULL);
+	if (resp->hdr.payloadlen != 0) {
+		assert(resp->payload != NULL);
 
 		p = resp->payload;
-		s = vmk_SgCopyFrom(cmd->sgArray, p, r->len);
+		s = vmk_SgCopyFrom(p, cmd->sgArray, r->len);
 		assert(s == VMK_OK);
 		if (s != VMK_OK) {
 			/*
 			 * TODO
 			 */
 		}
-
-		len = r->len;
 	}
 	set_cmd_complete(cmd, len);
-	rpc_msg_put(rcp, msgp);
+	rpc_msg_put(rcp, m);
 
 	cmd->done(cmd);
 	return 0;
@@ -1210,11 +1238,33 @@ static int resp_read_cmd(rpc_chan_t *rcp, rpc_msg_t *m)
 
 static int resp_write_cmd(rpc_chan_t *rcp, rpc_msg_t *m)
 {
-	rpc_msg_put(rcp, msgp);
+	vmk_ScsiCommand *cmd;
+	ExampleCommand  *ex_cmd;
+	write_cmd_t     *w;
+	vmk_ByteCount   bc;
+	rpc_msg_t       *resp;
+
+	assert(rcp != NULL);
+	assert(m   != NULL);
+
+	ex_cmd = m->opaque;
+	cmd    = ex_cmd->scsiCmd;
+	w      = (write_cmd_t *) &m->hdr;
+	bc     = w->len;
+	resp   = m->resp;
+
+	assert(resp != NULL);
+	assert(resp->hdr.payloadlen == 0);
+	assert(resp->payload == NULL);
+
+	set_cmd_complete(cmd, bc);
+	rpc_msg_put(rcp, m);
+
+	cmd->done(cmd);
 	return 0;
 }
 
-void mpp_resp_handler(rpc_msg_t *msgp)
+static void cb_mpp_resp_handler(rpc_msg_t *msgp)
 {
 	rpc_chan_t     *rcp;
 
@@ -1245,22 +1295,21 @@ static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	read_cmd_t       *r;
 	int              rc;
 
-	cmd = ex_cmd->cmd;
+	cmd = ex_cmd->scsiCmd;
 	vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
 			&offset, &blocks);
 
-	len = blocks * SECTOR_SIZE;
+	len = SECTOR_TO_BYTES(blocks);
 	m   = NULL;
-	p   = NULL;
 
 	rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*m), &m);
 	assert(m != NULL);
 
 	bc        = vmk_SgGetDataLen(cmd->sgArray);
+	m->opaque = ex_cmd;
 	r         = (read_cmd_t *) &m->hdr;
 	r->offset = offset;
 	r->len    = len;
-	r->opaque = ex_cmd;
 
 	rc        = rpc_async_request(rcp, m);
 	if (rc < 0) {
@@ -1275,7 +1324,7 @@ error:
 	return VMK_FAILURE;
 }
 
-static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd)
+static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 {
 	vmk_ScsiCommand  *cmd;
 	vmk_uint64       offset;
@@ -1287,11 +1336,11 @@ static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd)
 	write_cmd_t      *w;
 	int              rc;
 
-	cmd = ex_cmd->cmd;
+	cmd = ex_cmd->scsiCmd;
 	vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
 			&offset, &blocks);
 
-	len = blocks * SECTOR_SIZE;
+	len = SECTOR_TO_BYTES(blocks);
 	m   = NULL;
 	p   = NULL;
 
@@ -1299,23 +1348,23 @@ static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd)
 	assert(m != NULL);
 
 	if (blocks != 0) {
-		rpc_payload_get(rcp, , &p);
+		rpc_payload_get(rcp, len, &p);
 		assert(p != NULL);
 
-		rpc_payload_set(rcp, m, p, bc);
+		rpc_payload_set(rcp, m, p, len);
 		assert(m->payload != NULL);
 		assert(m->hdr.payloadlen != 0);
 
-		s = vmk_SgCopyFrom(p, cmd->sgArray, bc);
+		s = vmk_SgCopyFrom(p, cmd->sgArray, len);
 		if (s != VMK_OK) {
 			goto error;
 		}
 	}
 
+	m->opaque = ex_cmd;
 	w         = (write_cmd_t *) &m->hdr;
 	w->offset = offset;
 	w->len    = len;
-	w->opaque = ex_cmd;
 	rc        = rpc_async_request(rcp, m);
 	if (rc < 0) {
 		goto error;
@@ -1346,8 +1395,7 @@ static inline VMK_ReturnStatus cachebox_rw_cmd(ExampleCommand *exCmd, rpc_chan_t
 
 static inline vmk_Bool is_rw_cmd(vmk_ScsiCommand *cmd)
 {
-	vmk_ScsiCommand *cmd = exCmd->scsiCmd;
-
+	return VMK_FALSE;
 	return cmd->isReadCdb || cmd->isWriteCdb;
 }
 
@@ -1359,6 +1407,7 @@ ExampleIssueCommand(vmk_ScsiDevice *scsiDev,
 	VMK_ReturnStatus status;
 	ExampleDevice *exDev = ExampleGetExDev(scsiDev);
 	ExamplePath *exPath;
+	vmk_Bool rc;
 
 	exCmd->exDev = exDev;
 	exCmd->scsiCmd = cmd;
@@ -1429,7 +1478,7 @@ ExampleIssueCommand(vmk_ScsiDevice *scsiDev,
 	if (rc == VMK_FALSE) {
 		status = vmk_ScsiIssueAsyncPathCommandDirect(exCmd->scsiPath, cmd);
 	} else {
-		status = cachebox_rw_cmd(exCmd, &rpc);
+		status = cachebox_rw_cmd(exCmd, exDev->rpc);
 	}
 	if (status != VMK_OK) {
 		ExampleIssueFail(exCmd->scsiPath, cmd, status);
@@ -1742,6 +1791,92 @@ ExampleDeviceStartCommand(vmk_ScsiDevice *scsiDev)
 
 	return VMK_OK;
 }
+
+static inline VMK_ReturnStatus cb_start_command(void *data)
+{
+	ExampleDevice    *ex_dev = data;
+	VMK_ReturnStatus s;
+
+	while (1) {
+		s = vmk_WorldWait((vmk_WorldEventID) &ex_dev->nouse,
+			VMK_LOCK_INVALID, VMK_TIMEOUT_UNLIMITED_MS,
+			"bhendi kam karna jara");
+		assert(s == VMK_OK);
+
+		ExampleDeviceStartCommand(ex_dev->device);
+	}
+}
+
+static inline void deinit_cachebox(void)
+{
+	rpc_chan_t *rcp = &rpc;
+	rpc_chan_close(rcp);
+	rpc_chan_deinit(rcp);
+//	pthread_cancel(sc_world);
+}
+
+static inline VMK_ReturnStatus init_cachebox(void)
+{
+//	vmk_Bool        ps; /* thread pool started */
+	rpc_chan_t      *rcp;
+	module_global_t module;
+	int             rc;
+
+//	ps   = VMK_FALSE;
+	rcp  = &rpc;
+
+	_module_struct_init(&module);
+
+	/*
+	 * TODO:
+	 *  - sock must be part of ExampleDevice. Avoid using global struct.
+	 *  - rpc_chan_t must be part of ExampleDevice
+	 */
+
+	rc = vmware_socket_sys_init(EXAMPLE_NAME, &module);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
+#if 0
+	rc = pthread_create(&ex_dev->sc_world, "sc_thread", &module,
+			cb_start_command, ex_dev);
+	if (rc < 0) {
+		goto error;
+	}
+	ps = VMK_TRUE;
+#endif
+
+	rc = client_setup(SIP, strlen(SIP), SPORT, CIP, strlen(CIP), CPORT, &sock);
+	if (rc < 0) {
+		vmk_WarningMessage("client setup failed.\n");
+		goto error;
+	}
+
+	rc = rpc_chan_init(rcp, &module, sock, IODEPTH, 4, sizeof(rpc_maxmsg_t),
+			IODEPTH * 2, cb_mpp_req_handler, cb_mpp_resp_handler);
+	if (rc < 0) {
+		vmk_WarningMessage("rpc_chan_init failed.\n");
+		goto error;
+	}
+
+	return VMK_OK;
+
+error:
+#if 0
+	if (ps) {
+		pthread_cancel(ex_dev->sc_world);
+	}
+#endif
+
+	vmware_socket_sys_deinit();
+	if (sock != -1) {
+		socket_close(sock);
+	}
+	return VMK_FAILURE;
+}
+
+
 
 /*
  ***********************************************************************
@@ -2605,115 +2740,132 @@ ExamplePathClaimBegin(vmk_ScsiPlugin *_plugin)
 static VMK_ReturnStatus
 ExamplePathClaimEnd(vmk_ScsiPlugin *_plugin)
 {
-   VMK_ReturnStatus status = VMK_OK;
-   vmk_uint32 i;
+	VMK_ReturnStatus status = VMK_OK;
+	vmk_uint32 i;
+	int rc;
+	module_global_t module;
 
-   VMK_ASSERT(_plugin == plugin);
-   vmk_WarningMessage("Anup: ExamplePathClaimEnd start\n");
-   VMK_ASSERT(vmk_ScsiGetPluginState(plugin) ==
-              VMK_SCSI_PLUGIN_STATE_CLAIM_PATHS);
+	_module_struct_init(&module);
 
-   vmk_ScsiSetPluginState(plugin, VMK_SCSI_PLUGIN_STATE_ENABLED);
+	VMK_ASSERT(_plugin == plugin);
+	vmk_WarningMessage("Anup: ExamplePathClaimEnd start\n");
+	VMK_ASSERT(vmk_ScsiGetPluginState(plugin) ==
+			VMK_SCSI_PLUGIN_STATE_CLAIM_PATHS);
 
-   /*
-    * Once all known paths to a device have been presented and claimed,
-    * try to register any logical devices with PSA.
-    */
+	vmk_ScsiSetPluginState(plugin, VMK_SCSI_PLUGIN_STATE_ENABLED);
 
-   vmk_SemaLock(&deviceSema);
-   
-   for (i = 0; i < maxDevices; i++) {
-      ExampleDevice *exDev = createdDevices[i];
+	/*
+	 * Once all known paths to a device have been presented and claimed,
+	 * try to register any logical devices with PSA.
+	 */
 
-      if (exDev == NULL) {
-         continue;
-      }
+	vmk_SemaLock(&deviceSema);
 
-      vmk_SpinlockLock(exDev->lock);
-      if (exDev->flags & EXAMPLE_DEVICE_REGISTERED) {
-         /*
-          * A path to an already existing device was discovered. Run a
-          * probe before completing the claim. This makes sure the
-          * path is no longer dead when the rescan or claim operation
-          * that started path claiming finishes.
-          */
-         if (exDev->flags & EXAMPLE_DEVICE_NEEDS_UPDATE) {
-            exDev->flags &= ~EXAMPLE_DEVICE_NEEDS_UPDATE;
-            vmk_SpinlockUnlock(exDev->lock);
-            status = ExampleDeviceProbe(exDev->device);
-            if (status != VMK_OK) {
-               if (status != VMK_BUSY) {
-                  vmk_Warning(pluginLog, "ExampleDeviceProbe failed: %s",
-                              vmk_StatusToString(status));
-               }
-               vmk_ScsiSwitchDeviceProbeRate(exDev->device,
-                                             VMK_SCSI_PROBE_RATE_FAST,
-                                             VMK_SCSI_ONE_PROBE_ONLY,
-                                             NULL, NULL);
-            }
-         } else {
-            vmk_SpinlockUnlock(exDev->lock);
-         }
-      } else {
-         vmk_ScsiUid *uids[1];
+	for (i = 0; i < maxDevices; i++) {
+		ExampleDevice *exDev = createdDevices[i];
 
-         vmk_SpinlockUnlock(exDev->lock);
-         uids[0] = &exDev->deviceUid;
-         
-         /* Set the Primary flag */
-         uids[0]->idFlags = VMK_SCSI_UID_FLAG_PRIMARY;
-         
-         vmk_LogDebug(pluginLog, 2,
-                      "Registering logical device with uid '%s'.", 
-                      uids[0]->id);
+		if (exDev == NULL) {
+			continue;
+		}
 
-         exDev->device = vmk_ScsiAllocateDevice(plugin);
-         if (exDev->device == NULL) {
-            vmk_Warning(pluginLog,
-                        "Out of memory allocating device with uid '%s'.",
-                        uids[0]->id);
-            status = VMK_NO_MEMORY;
-            continue;
-         }
+		vmk_SpinlockLock(exDev->lock);
+		if (exDev->flags & EXAMPLE_DEVICE_REGISTERED) {
+			/*
+			 * A path to an already existing device was discovered. Run a
+			 * probe before completing the claim. This makes sure the
+			 * path is no longer dead when the rescan or claim operation
+			 * that started path claiming finishes.
+			 */
+			if (exDev->flags & EXAMPLE_DEVICE_NEEDS_UPDATE) {
+				exDev->flags &= ~EXAMPLE_DEVICE_NEEDS_UPDATE;
+				vmk_SpinlockUnlock(exDev->lock);
+				status = ExampleDeviceProbe(exDev->device);
+				if (status != VMK_OK) {
+					if (status != VMK_BUSY) {
+						vmk_Warning(pluginLog, "ExampleDeviceProbe failed: %s",
+								vmk_StatusToString(status));
+					}
+					vmk_ScsiSwitchDeviceProbeRate(exDev->device,
+							VMK_SCSI_PROBE_RATE_FAST,
+							VMK_SCSI_ONE_PROBE_ONLY,
+							NULL, NULL);
+				}
+			} else {
+				vmk_SpinlockUnlock(exDev->lock);
+			}
+		} else {
+			vmk_ScsiUid *uids[1];
 
-         exDev->device->pluginPrivateData = exDev;
-         exDev->device->ops = &exampleDeviceOps;
-         exDev->device->moduleID = moduleID;
+			vmk_SpinlockUnlock(exDev->lock);
+			uids[0] = &exDev->deviceUid;
 
-         status = ExampleDeviceProbe(exDev->device);
-         if (status != VMK_OK) {
-            vmk_Warning(pluginLog, "ExampleDeviceProbe failed: %s",
-                        vmk_StatusToString(status));
-            vmk_ScsiFreeDevice(exDev->device);
-            exDev->device = NULL;
-            vmk_SemaUnlock(&deviceSema);
-   	    vmk_WarningMessage("Anup: ExamplePathClaimEnd return failed\n");
-            return status;
-         }
+			/* Set the Primary flag */
+			uids[0]->idFlags = VMK_SCSI_UID_FLAG_PRIMARY;
 
-         status = vmk_ScsiRegisterDevice(exDev->device, uids, 1);
-         if (status == VMK_OK) {
-            vmk_SpinlockLock(exDev->lock);
-            exDev->flags |= EXAMPLE_DEVICE_REGISTERED;
-            vmk_SpinlockUnlock(exDev->lock);
-         } else {
-            vmk_LogDebug(pluginLog, 0,
-                         "Failed to register device with uid '%s': %s",
-                         uids[0]->id, vmk_StatusToString(status));
-            /*
-             * The registration failed. 
-             * exDev->device may be in an inconsistent state. 
-             */
-            vmk_ScsiFreeDevice(exDev->device);
-            exDev->device = NULL;
-         }
-      }
-   }
+			vmk_LogDebug(pluginLog, 2,
+					"Registering logical device with uid '%s'.", 
+					uids[0]->id);
 
-   vmk_SemaUnlock(&deviceSema);
+			exDev->device = vmk_ScsiAllocateDevice(plugin);
+			if (exDev->device == NULL) {
+				vmk_Warning(pluginLog,
+						"Out of memory allocating device with uid '%s'.",
+						uids[0]->id);
+				status = VMK_NO_MEMORY;
+				continue;
+			}
 
-   vmk_WarningMessage("Anup: ExamplePathClaimEnd return success\n");
-   return status;
+			exDev->device->pluginPrivateData = exDev;
+			exDev->device->ops = &exampleDeviceOps;
+			exDev->device->moduleID = moduleID;
+
+			status = ExampleDeviceProbe(exDev->device);
+			if (status != VMK_OK) {
+				vmk_Warning(pluginLog, "ExampleDeviceProbe failed: %s",
+						vmk_StatusToString(status));
+				vmk_ScsiFreeDevice(exDev->device);
+				exDev->device = NULL;
+				vmk_SemaUnlock(&deviceSema);
+				vmk_WarningMessage("Anup: ExamplePathClaimEnd return failed\n");
+				return status;
+			}
+
+			status = vmk_ScsiRegisterDevice(exDev->device, uids, 1);
+			if (status == VMK_OK) {
+				vmk_SpinlockLock(exDev->lock);
+				exDev->flags |= EXAMPLE_DEVICE_REGISTERED;
+				vmk_SpinlockUnlock(exDev->lock);
+			} else {
+				vmk_LogDebug(pluginLog, 0,
+						"Failed to register device with uid '%s': %s",
+						uids[0]->id, vmk_StatusToString(status));
+				/*
+				 * The registration failed. 
+				 * exDev->device may be in an inconsistent state. 
+				 */
+				vmk_ScsiFreeDevice(exDev->device);
+				exDev->device = NULL;
+			}
+
+		}
+
+		exDev->rpc   = &rpc;
+		exDev->nouse = 0;
+		rc = pthread_create(&exDev->sc_world, "sc_thread", &module,
+				cb_start_command, exDev);
+		if (rc < 0) {
+				vmk_ScsiFreeDevice(exDev->device);
+				exDev->device = NULL;
+				vmk_SemaUnlock(&deviceSema);
+				vmk_WarningMessage("Anup: thread creation failed.\n");
+			return VMK_FAILURE;
+		}
+	}
+
+	vmk_SemaUnlock(&deviceSema);
+
+	vmk_WarningMessage("Anup: ExamplePathClaimEnd return success\n");
+	return status;
 }
 
 /*
@@ -2726,146 +2878,151 @@ ExamplePathClaimEnd(vmk_ScsiPlugin *_plugin)
  *
  ***********************************************************************
  */
-static VMK_ReturnStatus
-ExampleClaimPath(vmk_ScsiPath *path,
-                 vmk_Bool *claimed)
+static VMK_ReturnStatus ExampleClaimPath(vmk_ScsiPath *path, vmk_Bool *claimed)
 {
-   ExampleDevice *exDev;
-   ExamplePath *exPath;
-   vmk_ScsiUid *uid;
-   vmk_uint32 i;
-   VMK_ReturnStatus status;
-   vmk_Bool deviceSlotAvailable = VMK_FALSE;
+	ExampleDevice *exDev;
+	ExamplePath *exPath;
+	vmk_ScsiUid *uid;
+	vmk_uint32 i;
+	VMK_ReturnStatus status;
+	vmk_Bool deviceSlotAvailable = VMK_FALSE;
 
-   VMK_ASSERT(vmk_ScsiGetPluginState(plugin) ==
-              VMK_SCSI_PLUGIN_STATE_CLAIM_PATHS);
+	VMK_ASSERT(vmk_ScsiGetPluginState(plugin) ==
+			VMK_SCSI_PLUGIN_STATE_CLAIM_PATHS);
 
-   vmk_WarningMessage("Anup: ExampleClaimPath start\n");
-   if (!ExampleIsSupportedArray(path)) {
-      *claimed = VMK_FALSE;
-      return VMK_OK;
-   }
+	vmk_WarningMessage("Anup: ExampleClaimPath start\n");
+	if (!ExampleIsSupportedArray(path)) {
+		*claimed = VMK_FALSE;
+		return VMK_OK;
+	}
 
-   /*
-    * We support the array and intend to claim the path. If something should
-    * happen that prevents us from successfully claiming it, simply return
-    * a non-VMK_OK status to let the framework know that a problem occured 
-    * and that it should NOT offer the path to any other plugin. The framework
-    * will re-submit the path on the next rescan.
-    */
+	vmk_WarningMessage("%s: path %s lun = %d\n", __func__, vmk_ScsiGetPathName(path), vmk_ScsiGetPathLUN(path));
+	if (vmk_ScsiGetPathLUN(path) != 1) {
+		*claimed = VMK_FALSE;
+		return VMK_OK;
+	}
 
-   status = ExampleCreateExPath(path, &exPath);
-   if (status != VMK_OK) {
-      return status;
-   }
+	vmk_WarningMessage("%s: claiming path %s lun = %d\n", __func__, vmk_ScsiGetPathName(path), vmk_ScsiGetPathLUN(path));
+	/*
+	 * We support the array and intend to claim the path. If something should
+	 * happen that prevents us from successfully claiming it, simply return
+	 * a non-VMK_OK status to let the framework know that a problem occured 
+	 * and that it should NOT offer the path to any other plugin. The framework
+	 * will re-submit the path on the next rescan.
+	 */
 
-   /* Get the device's UID */
-   uid = vmk_HeapAlloc(miscHeap, sizeof(*uid));
-   if (uid == NULL) {
-      status = VMK_NO_MEMORY;
-      goto error;
-   }
-   vmk_Memset(uid, 0, sizeof(*uid));
+	status = ExampleCreateExPath(path, &exPath);
+	if (status != VMK_OK) {
+		return status;
+	}
 
-   status = vmk_ScsiGetCachedPathStandardUID(path, uid);
-   if (status != VMK_OK) {
-      /*
-       * The device has no standard UID. Assume that this is a local SCSI disk
-       * with a single path, and use the path name as the UID.
-       */
-      VMK_ASSERT_ON_COMPILE(VMK_SCSI_PATH_NAME_MAX_LEN <=
-                            VMK_SCSI_UID_MAX_ID_LEN);
-      vmk_Snprintf(uid->id, VMK_SCSI_UID_MAX_ID_LEN - 1, "mpx.%s",
-                   vmk_ScsiGetPathName(path));
-   }
+	/* Get the device's UID */
+	uid = vmk_HeapAlloc(miscHeap, sizeof(*uid));
+	if (uid == NULL) {
+		status = VMK_NO_MEMORY;
+		goto error;
+	}
+	vmk_Memset(uid, 0, sizeof(*uid));
+
+	status = vmk_ScsiGetCachedPathStandardUID(path, uid);
+	if (status != VMK_OK) {
+		/*
+		 * The device has no standard UID. Assume that this is a local SCSI disk
+		 * with a single path, and use the path name as the UID.
+		 */
+		VMK_ASSERT_ON_COMPILE(VMK_SCSI_PATH_NAME_MAX_LEN <=
+				VMK_SCSI_UID_MAX_ID_LEN);
+		vmk_Snprintf(uid->id, VMK_SCSI_UID_MAX_ID_LEN - 1, "mpx.%s",
+				vmk_ScsiGetPathName(path));
+	}
 
 
-   /*
-    * Grab the semaphore to be sure that no other thread is 
-    * accessing createdDevices.
-    */
-   vmk_SemaLock(&deviceSema);
+	/*
+	 * Grab the semaphore to be sure that no other thread is 
+	 * accessing createdDevices.
+	 */
+	vmk_SemaLock(&deviceSema);
 
-   /* 
-    * If a device with this UID already exists, use it; 
-    * otherwise create one
-    */
-   for (i = 0; i < maxDevices; i++) {
-      exDev = createdDevices[i];
+	/* 
+	 * If a device with this UID already exists, use it; 
+	 * otherwise create one
+	 */
+	for (i = 0; i < maxDevices; i++) {
+		exDev = createdDevices[i];
 
-      if (exDev == NULL) {
-         deviceSlotAvailable = VMK_TRUE;
-      } else if (vmk_ScsiUIDsAreEqual(uid, &exDev->deviceUid)) {
-         status = VMK_OK;
-         break;
-      }
-   }
+		if (exDev == NULL) {
+			deviceSlotAvailable = VMK_TRUE;
+		} else if (vmk_ScsiUIDsAreEqual(uid, &exDev->deviceUid)) {
+			status = VMK_OK;
+			break;
+		}
+	}
 
-   if (i == maxDevices) {
-      if (deviceSlotAvailable) {
-         status = ExampleCreateDevice(uid, &exDev);
-      } else {
-         status = VMK_NO_RESOURCES;
-      }
-   }
+	if (i == maxDevices) {
+		if (deviceSlotAvailable) {
+			status = ExampleCreateDevice(uid, &exDev);
+		} else {
+			status = VMK_NO_RESOURCES;
+		}
+	}
 
-   vmk_SemaUnlock(&deviceSema);
+	vmk_SemaUnlock(&deviceSema);
 
-   if (status != VMK_OK) {
-      goto error;
-   }
+	if (status != VMK_OK) {
+		goto error;
+	}
 
-   /* Add the path to the device */
-   vmk_SpinlockLock(exDev->lock);
-   for (i = 0; i < EXAMPLE_MAX_PATHS_PER_DEVICE; i++) {
-      if (exDev->paths[i] == NULL) {
-         exDev->paths[i] = path;
-         exPath->exDev = exDev;
-         exDev->numPaths++;
-         break;
-      }
-   }
-   vmk_SpinlockUnlock(exDev->lock);
+	/* Add the path to the device */
+	vmk_SpinlockLock(exDev->lock);
+	for (i = 0; i < EXAMPLE_MAX_PATHS_PER_DEVICE; i++) {
+		if (exDev->paths[i] == NULL) {
+			exDev->paths[i] = path;
+			exPath->exDev = exDev;
+			exDev->numPaths++;
+			break;
+		}
+	}
+	vmk_SpinlockUnlock(exDev->lock);
 
-   if (i == EXAMPLE_MAX_PATHS_PER_DEVICE) {
-      vmk_LogDebug(pluginLog, 2,
-                   "Too many paths to logical device '%s'. Could not add "
-                   "path '%s'", ExampleDeviceGetName(exDev),
-                   vmk_ScsiGetPathName(path));
-      status = VMK_NO_RESOURCES;
-      goto error;
-   }
+	if (i == EXAMPLE_MAX_PATHS_PER_DEVICE) {
+		vmk_LogDebug(pluginLog, 2,
+				"Too many paths to logical device '%s'. Could not add "
+				"path '%s'", ExampleDeviceGetName(exDev),
+				vmk_ScsiGetPathName(path));
+		status = VMK_NO_RESOURCES;
+		goto error;
+	}
 
-   vmk_SpinlockLock(exDev->lock);
-   if (exDev->flags & EXAMPLE_DEVICE_REGISTERED) {
-      VMK_ASSERT(exDev->device);
-      exDev->flags |= EXAMPLE_DEVICE_NEEDS_UPDATE;
-   }
-   vmk_SpinlockUnlock(exDev->lock);
-   vmk_HeapFree(miscHeap, uid);
-   uid = NULL;
+	vmk_SpinlockLock(exDev->lock);
+	if (exDev->flags & EXAMPLE_DEVICE_REGISTERED) {
+		VMK_ASSERT(exDev->device);
+		exDev->flags |= EXAMPLE_DEVICE_NEEDS_UPDATE;
+	}
+	vmk_SpinlockUnlock(exDev->lock);
+	vmk_HeapFree(miscHeap, uid);
+	uid = NULL;
 
-   vmk_LogDebug(pluginLog, 3, "Added path '%s' to logical device '%s'",
-                vmk_ScsiGetPathName(path),
-                ExampleDeviceGetName(exDev));
+	vmk_LogDebug(pluginLog, 3, "Added path '%s' to logical device '%s'",
+			vmk_ScsiGetPathName(path),
+			ExampleDeviceGetName(exDev));
 
-   *claimed = VMK_TRUE;
+	*claimed = VMK_TRUE;
 
-   return VMK_OK;
+	return VMK_OK;
 
 error:
-   vmk_LogDebug(pluginLog, 1, "Failed to claim path '%s'",
-                vmk_ScsiGetPathName(path));
+	vmk_LogDebug(pluginLog, 1, "Failed to claim path '%s'",
+			vmk_ScsiGetPathName(path));
 
-   if (uid != NULL) {
-      vmk_HeapFree(miscHeap, uid);
-   }
+	if (uid != NULL) {
+		vmk_HeapFree(miscHeap, uid);
+	}
 
-   if (exPath != NULL) {
-      ExampleDestroyExPath(exPath);
-   }
+	if (exPath != NULL) {
+		ExampleDestroyExPath(exPath);
+	}
 
-   return status;
+	return status;
 }
 
 /*
@@ -3007,6 +3164,8 @@ ExampleUnclaimPath(vmk_ScsiPath *path)
       ExampleDrainBusyCount(exDev);
       vmk_SpinlockUnlock(exDev->lock);
 
+      pthread_cancel(exDev->sc_world);
+
       status = ExampleDestroyDevice(exDev);
       if (status != VMK_OK) {
          /*
@@ -3048,6 +3207,7 @@ ExampleUnclaimPath(vmk_ScsiPath *path)
       vmk_SpinlockLock(exPath->lock);
    }
    vmk_SpinlockUnlock(exPath->lock);
+
 
    VMK_ASSERT(i < EXAMPLE_MAX_PATHS_PER_DEVICE);
  
@@ -4259,46 +4419,6 @@ ExamplePluginStateLogger(struct vmk_ScsiPlugin *plugin,
  *
  ************************************************************/
 
-static inline void deinit_cachebox(void)
-{
-	rpc_chan_close(&rpc);
-	rpc_chan_deinit(&rpc);
-}
-
-static inline VMK_ReturnStatus init_cachebox(void)
-{
-	module_global_t module;
-	int             rc;
-
-	_module_struct_init(&module);
-
-	rc = vmware_socket_sys_init(EXAMPLE_NAME, &module);
-	if (rc < 0) {
-		return VMK_FAILURE;
-	}
-
-	rc = client_setup(SIP, strlen(SIP), SPORT, CIP, strlen(CIP), CPORT, &sock);
-	if (rc < 0) {
-		vmk_WarningMessage("client setup failed.\n");
-		goto error;
-	}
-
-	rc = rpc_chan_init(&rpc, &module, sock, IODEPTH, 4, sizeof(rpc_maxmsg_t), IODEPTH * 2, cb_mpp_req_handler, cb_mpp_resp_handler);
-	if (rc < 0) {
-		vmk_WarningMessage("rpc_chan_init failed.\n");
-		goto error;
-	}
-
-	return VMK_OK;
-
-error:
-	vmware_socket_sys_deinit();
-	if (sock != -1) {
-		socket_close(sock);
-	}
-	return VMK_FAILURE;
-}
-
 /*
  ***********************************************************************
  * init_module --                                                 */ /**
@@ -4327,10 +4447,11 @@ init_module(void)
    vmk_Bool logRegistered = VMK_FALSE;
    vmk_Bool miscHeapInitialized = VMK_FALSE;
    vmk_Bool exCmdHeapInitialized= VMK_FALSE;
-   vmk_Bool moduleRegistered = VMK_FALSE; 
+   vmk_Bool moduleRegistered = VMK_FALSE;
    vmk_Bool configHandleInitialized = VMK_FALSE;
    vmk_Bool deviceArrayCreated = VMK_FALSE;
    vmk_Bool tqInitialized = VMK_FALSE;
+   vmk_Bool cachebox_initized = VMK_FALSE;
    vmk_uint32 i;
    vmk_HeapCreateProps heapProps;
    vmk_LogProperties logProps;
@@ -4537,13 +4658,6 @@ init_module(void)
 
    pluginRegistered = VMK_TRUE;
 
-   status = init_cachebox();
-   if (status != VMK_OK) {
-       goto error;
-   }
-
-   cachebox_initized = VMK_TRUE;
-
    /* Enable the plugin */
    status = ExampleStartPlugin();
    if (status != VMK_OK) {
@@ -4558,13 +4672,15 @@ init_module(void)
 	      goto error;
       }
 #endif
+		status = init_cachebox();
+		if (status != VMK_OK) {
+			vmk_WarningMessage("Initializing CacheBox Failed.\n");
+			return status;
+		}
 
 
       return 0;
 error:
-   if (cachebox_initized) {
-   	deinit_cachebox();
-   }
    if (pluginRegistered) {
       vmk_ScsiSetPluginState(plugin, VMK_SCSI_PLUGIN_STATE_DISABLED);
       vmk_ScsiUnregisterPlugin(plugin);
@@ -4658,6 +4774,8 @@ cleanup_module(void)
 
    VMK_ASSERT(vmk_ListIsEmpty(&retryQueue));
 
+   deinit_cachebox();
+
    for (i = 0; i < maxDevices; i++) {
       VMK_ASSERT(createdDevices[i] == NULL);
    }
@@ -4693,14 +4811,6 @@ cleanup_module(void)
    vmk_ConfigParamClose(configLogMPCmdErrorsHandle);
 
    return;
-}
-
-static inline _module_struct_init(module_global_t *module)
-{
-	module->module   = EXAMPLE_SHORT_NAME;
-	module->mod_id   = moduleID;
-	module->heap_id  = miscHeap;
-	module->lockd_id = lockDomain;
 }
 
 static inline VMK_ReturnStatus _pthread_lock_test_func(void *data)
@@ -4876,19 +4986,6 @@ err:
 	thread_pool_deinit(&tp);
 
 	return VMK_FAILURE;
-}
-
-static inline int strlen(const char *s)
-{
-	int i;
-
-	i = 0;
-	while (*s) {
-		s++;
-		i++;
-	}
-
-	return i;
 }
 
 static int cond;

@@ -85,6 +85,39 @@ static inline vmware_socket_t *vmware_socket_get(sock_handle_t h)
 	return &vmw_socks[h];
 }
 
+static void print_error(VMK_ReturnStatus s)
+{
+	switch (s) {
+	case VMK_OK:
+		vmk_WarningMessage("VMK_OK\n");
+		break;
+	case VMK_BAD_PARAM:
+		vmk_WarningMessage("VMK_BAD_PARAM\n");
+		break;
+	case VMK_NO_MEMORY:
+		vmk_WarningMessage("VMK_NO_MEMORY\n");
+		break;
+	case VMK_EPROTONOSUPPORT:
+		vmk_WarningMessage("VMK_EPROTONOSUPPORT\n");
+		break;
+	case VMK_BAD_PARAM_TYPE:
+		vmk_WarningMessage("VMK_BAD_PARAM_TYPE\n");
+		break;
+	case VMK_NO_BUFFERSPACE:
+		vmk_WarningMessage("VMK_NO_BUFFERSPACE\n");
+		break;
+	case VMK_EOPNOTSUPP:
+		vmk_WarningMessage("VMK_EOPNOTSUPP\n");
+		break;
+	case VMK_NO_ACCESS:
+		vmk_WarningMessage("VMK_NO_ACCESS\n");
+		break;
+	default:
+		vmk_WarningMessage("default\n");
+		break;
+	}
+}
+
 static sock_handle_t socket(int domain, int type, int protocol)
 {
 	vmware_socket_t  *vs;
@@ -101,6 +134,7 @@ static sock_handle_t socket(int domain, int type, int protocol)
 	if (rc != VMK_OK) {
 		vmware_socket_free(vs);
 		vmk_WarningMessage("%s: vmk_SocketCreate failed\n", __func__);
+		print_error(rc);
 		return -1;
 	}
 

@@ -115,7 +115,7 @@ int thread_pool_init(thread_pool_t *tp, const char *name,
 		return -1;
 	}
 
-	nwork     = 32;
+	nwork     = 128;
 	nwork_max = nwork * 4;
 
 	rc = bufpool_init(&tp->pool, n, module, sizeof(struct work), nwork,

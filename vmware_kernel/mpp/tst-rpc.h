@@ -5,7 +5,7 @@
 
 #define IODEPTH 32
 
-#define SIP   "192.168.2.15"
+#define SIP   "192.168.2.34"
 #define SPORT 45678
 #define CIP   "192.168.2.32"
 #define CPORT (SPORT + 1)
