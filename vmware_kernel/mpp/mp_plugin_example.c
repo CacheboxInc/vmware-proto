@@ -1395,7 +1395,6 @@ static inline VMK_ReturnStatus cachebox_rw_cmd(ExampleCommand *exCmd, rpc_chan_t
 
 static inline vmk_Bool is_rw_cmd(vmk_ScsiCommand *cmd)
 {
-	return VMK_FALSE;
 	return cmd->isReadCdb || cmd->isWriteCdb;
 }
 
@@ -2830,6 +2829,18 @@ ExamplePathClaimEnd(vmk_ScsiPlugin *_plugin)
 				return status;
 			}
 
+			exDev->rpc   = &rpc;
+			exDev->nouse = 0;
+			rc = pthread_create(&exDev->sc_world, "sc_thread", &module,
+					cb_start_command, exDev);
+			if (rc < 0) {
+					vmk_ScsiFreeDevice(exDev->device);
+					exDev->device = NULL;
+					vmk_SemaUnlock(&deviceSema);
+					vmk_WarningMessage("Anup: thread creation failed.\n");
+				return VMK_FAILURE;
+			}
+
 			status = vmk_ScsiRegisterDevice(exDev->device, uids, 1);
 			if (status == VMK_OK) {
 				vmk_SpinlockLock(exDev->lock);
@@ -2849,17 +2860,6 @@ ExamplePathClaimEnd(vmk_ScsiPlugin *_plugin)
 
 		}
 
-		exDev->rpc   = &rpc;
-		exDev->nouse = 0;
-		rc = pthread_create(&exDev->sc_world, "sc_thread", &module,
-				cb_start_command, exDev);
-		if (rc < 0) {
-				vmk_ScsiFreeDevice(exDev->device);
-				exDev->device = NULL;
-				vmk_SemaUnlock(&deviceSema);
-				vmk_WarningMessage("Anup: thread creation failed.\n");
-			return VMK_FAILURE;
-		}
 	}
 
 	vmk_SemaUnlock(&deviceSema);
@@ -4451,7 +4451,7 @@ init_module(void)
    vmk_Bool configHandleInitialized = VMK_FALSE;
    vmk_Bool deviceArrayCreated = VMK_FALSE;
    vmk_Bool tqInitialized = VMK_FALSE;
-   vmk_Bool cachebox_initized = VMK_FALSE;
+   vmk_Bool cachebox_initialized = VMK_FALSE;
    vmk_uint32 i;
    vmk_HeapCreateProps heapProps;
    vmk_LogProperties logProps;
@@ -4658,6 +4658,13 @@ init_module(void)
 
    pluginRegistered = VMK_TRUE;
 
+		status = init_cachebox();
+		if (status != VMK_OK) {
+			vmk_WarningMessage("Initializing CacheBox Failed.\n");
+			goto error;
+		}
+		cachebox_initialized = VMK_TRUE;
+
    /* Enable the plugin */
    status = ExampleStartPlugin();
    if (status != VMK_OK) {
@@ -4672,15 +4679,13 @@ init_module(void)
 	      goto error;
       }
 #endif
-		status = init_cachebox();
-		if (status != VMK_OK) {
-			vmk_WarningMessage("Initializing CacheBox Failed.\n");
-			return status;
-		}
 
 
       return 0;
 error:
+      if (cachebox_initialized) {
+      	deinit_cachebox();
+      }
    if (pluginRegistered) {
       vmk_ScsiSetPluginState(plugin, VMK_SCSI_PLUGIN_STATE_DISABLED);
       vmk_ScsiUnregisterPlugin(plugin);
