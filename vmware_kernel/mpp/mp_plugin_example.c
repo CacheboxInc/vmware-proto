@@ -1393,21 +1393,25 @@ static inline VMK_ReturnStatus cachebox_rw_cmd(ExampleCommand *exCmd, rpc_chan_t
 	return rc;
 }
 
-static inline vmk_Bool is_rw_cmd(vmk_ScsiCommand *cmd)
+static inline vmk_Bool should_cb_handle(vmk_ScsiCommand *cmd)
 {
-	vmk_uint64 sector;
-	vmk_uint32 blocks;
-
-	if (cmd->isReadCdb || cmd->isWriteCdb) {
-		vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
-				&sector, &blocks);
-		if (blocks == 0) {
-			return VMK_FALSE;
-		}
-		return VMK_TRUE;
-	} else {
+	switch (cmd->cdb[0]) {
+	default:
 		return VMK_FALSE;
+
+	case VMK_SCSI_CMD_READ6:
+	case VMK_SCSI_CMD_READ10:
+	case VMK_SCSI_CMD_READ12:
+	case VMK_SCSI_CMD_READ16:
+
+	case VMK_SCSI_CMD_WRITE6:
+	case VMK_SCSI_CMD_WRITE10:
+	case VMK_SCSI_CMD_WRITE12:
+	case VMK_SCSI_CMD_WRITE16:
+		break;
 	}
+
+	return cmd->isReadCdb || cmd->isWriteCdb;
 }
 
 static void
@@ -1484,7 +1488,7 @@ ExampleIssueCommand(vmk_ScsiDevice *scsiDev,
 
 	vmk_SpinlockUnlock(exDev->lock);
 
-	rc = is_rw_cmd(cmd);
+	rc = should_cb_handle(cmd);
 	if (rc == VMK_FALSE) {
 		status = vmk_ScsiIssueAsyncPathCommandDirect(exCmd->scsiPath, cmd);
 	} else {
