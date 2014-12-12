@@ -265,7 +265,7 @@ ExampleDeviceGetName(ExampleDevice *exDev)
    return exDev->deviceUid.id;
 }
 
-static inline _module_struct_init(module_global_t *module)
+static inline void _module_struct_init(module_global_t *module)
 {
 	module->module   = EXAMPLE_SHORT_NAME;
 	module->mod_id   = moduleID;
@@ -1219,7 +1219,7 @@ static int resp_read_cmd(rpc_chan_t *rcp, rpc_msg_t *m)
 		assert(resp->payload != NULL);
 
 		p = resp->payload;
-		s = vmk_SgCopyFrom(p, cmd->sgArray, r->len);
+		s = vmk_SgCopyTo(cmd->sgArray, p, r->len);
 		assert(s == VMK_OK);
 		if (s != VMK_OK) {
 			/*
@@ -1283,6 +1283,7 @@ static void cb_mpp_resp_handler(rpc_msg_t *msgp)
 static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 {
 	vmk_ScsiCommand  *cmd;
+	vmk_uint64       sector;
 	vmk_uint64       offset;
 	vmk_uint32       blocks;
 	uint64_t         len;
@@ -1293,10 +1294,11 @@ static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 
 	cmd = ex_cmd->scsiCmd;
 	vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
-			&offset, &blocks);
+			&sector, &blocks);
 
-	len = SECTOR_TO_BYTES(blocks);
-	m   = NULL;
+	offset = SECTOR_TO_BYTES(sector);
+	len    = SECTOR_TO_BYTES(blocks);
+	m      = NULL;
 
 	rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*r), &m);
 	assert(m != NULL);
@@ -1323,8 +1325,9 @@ error:
 static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 {
 	vmk_ScsiCommand  *cmd;
-	vmk_uint64       offset;
+	vmk_uint64       sector;
 	vmk_uint32       blocks;
+	vmk_uint64       offset;
 	uint64_t         len;
 	rpc_msg_t        *m;
 	char             *p;
@@ -1334,11 +1337,12 @@ static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 
 	cmd = ex_cmd->scsiCmd;
 	vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
-			&offset, &blocks);
+			&sector, &blocks);
 
-	len = SECTOR_TO_BYTES(blocks);
-	m   = NULL;
-	p   = NULL;
+	offset = SECTOR_TO_BYTES(sector);
+	len    = SECTOR_TO_BYTES(blocks);
+	m      = NULL;
+	p      = NULL;
 
 	rpc_msg_get(rcp, RPC_WRITE_MSG, sizeof(*w), &m);
 	assert(m != NULL);
@@ -1391,7 +1395,19 @@ static inline VMK_ReturnStatus cachebox_rw_cmd(ExampleCommand *exCmd, rpc_chan_t
 
 static inline vmk_Bool is_rw_cmd(vmk_ScsiCommand *cmd)
 {
-	return cmd->isReadCdb || cmd->isWriteCdb;
+	vmk_uint64 sector;
+	vmk_uint32 blocks;
+
+	if (cmd->isReadCdb || cmd->isWriteCdb) {
+		vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
+				&sector, &blocks);
+		if (blocks == 0) {
+			return VMK_FALSE;
+		}
+		return VMK_TRUE;
+	} else {
+		return VMK_FALSE;
+	}
 }
 
 static void
@@ -1799,6 +1815,8 @@ static inline VMK_ReturnStatus cb_start_command(void *data)
 
 		ExampleDeviceStartCommand(ex_dev->device);
 	}
+
+	return VMK_OK;
 }
 
 static inline void deinit_cachebox(void)
@@ -4946,7 +4964,7 @@ void do_work(work_t *w, void *data)
 	assert(data != NULL);
 
 	vmk_WorldSleep(1000);
-	vmk_WarningMessage("%s", data);
+	vmk_WarningMessage("%s", msg);
 	vmk_HeapFree(miscHeap, data);
 }
 
@@ -4954,7 +4972,6 @@ VMK_ReturnStatus threadpool_test(void)
 {
 	module_global_t module;
 	thread_pool_t   tp;
-	char            *tmp;
 	int             rc;
 	int             i;
 	work_t          *w;
@@ -4982,10 +4999,6 @@ VMK_ReturnStatus threadpool_test(void)
 	thread_pool_deinit(&tp);
 	vmk_WarningMessage("**** deinit DONE ******\n");
 	return VMK_OK;
-err:
-	thread_pool_deinit(&tp);
-
-	return VMK_FAILURE;
 }
 
 static int cond;
@@ -5008,7 +5021,7 @@ void mpp_resp_handler(rpc_msg_t *msgp)
 {
 	rpc_chan_t *rcp;
 //	vmk_Scsi_t *s;
-	uint64_t   r;
+//	uint64_t   r;
 
 	vmk_WarningMessage("%s ==>\n", __func__);
 	rcp = msgp->rcp;

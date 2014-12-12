@@ -221,7 +221,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	rc = bufpool_init_reserve(&rcp->msgpool, n1, module, msgsz + gap, nmsg,
 			reserve, nmsg_max);
 	if (rc < 0) {
-		vmk_WarningMessage("%S: bufpool_init_reserve failed\n", __func__);
+		vmk_WarningMessage("%s: bufpool_init_reserve failed\n", __func__);
 		goto error;
 	}
 
@@ -411,7 +411,7 @@ void rpc_msg_put(rpc_chan_t *rcp, rpc_msg_t *msgp)
 	bufpool_put(&rcp->msgpool, (char *) msgp);
 }
 
-void rpc_payload_get(rpc_chan_t *rcp, uint16_t len, char **bufp)
+void rpc_payload_get(rpc_chan_t *rcp, uint64_t len, char **bufp)
 {
 	assert(rcp  != NULL);
 	assert(bufp != NULL);
@@ -429,7 +429,7 @@ void rpc_payload_put(rpc_chan_t *rcp, char *buf)
 }
 
 void rpc_payload_set(rpc_chan_t *rcp, rpc_msg_t *msgp, char *payload,
-		uint16_t len)
+		uint64_t len)
 {
 	assert(rcp != NULL);
 	assert(msgp != NULL);

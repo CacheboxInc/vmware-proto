@@ -59,7 +59,7 @@ typedef struct rpc_msghdr {
 	uint32_t seqid;
 	uint16_t type;
 	uint16_t msglen;
-	uint16_t payloadlen;
+	uint64_t payloadlen;
 	uint16_t status;
 } rpc_msghdr_t;
 
@@ -87,8 +87,8 @@ int rpc_response(rpc_chan_t *rcp, rpc_msg_t *msgp);
 void rpc_msg_get(rpc_chan_t *rcp, int msgtype, size_t msglen, rpc_msg_t **msgp);
 void rpc_msg_put(rpc_chan_t *rcp, rpc_msg_t *msgp);
 
-void rpc_payload_get(rpc_chan_t *rcp, uint16_t len, char **bufp);
+void rpc_payload_get(rpc_chan_t *rcp, uint64_t len, char **bufp);
 void rpc_payload_put(rpc_chan_t *rcp, char *buf);
 void rpc_payload_set(rpc_chan_t *rcp, rpc_msg_t *msgp, char *payload,
-		uint16_t len);
+		uint64_t len);
 #endif

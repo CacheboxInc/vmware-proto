@@ -103,7 +103,6 @@ static inline int vmware_name(char *dst, const char *src1, const char *src2,
 
 static inline int pthread_mutex_init(vmk_Lock *lock, char *name, module_global_t *module)
 {
-	vmk_ByteCount           bc;
 	char                    n[128];
 	vmk_SpinlockCreateProps p;
 	VMK_ReturnStatus        rc;
