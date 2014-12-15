@@ -34,7 +34,7 @@ typedef struct work {
 
 
 int thread_pool_init(thread_pool_t *tp, const char *name,
-		module_global_t *module, int nthreads);
+		module_global_t *module, int nthreads, int nworks);
 void thread_pool_deinit(thread_pool_t *tp);
 
 work_t *new_work(thread_pool_t *tp);

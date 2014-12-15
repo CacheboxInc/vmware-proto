@@ -4,8 +4,19 @@
 #include "vmkapi.h"
 #include <stddef.h>
 
-#define assert  VMK_ASSERT
 #define memset	vmk_Memset
+
+#define assert(expr)                                                           \
+	do {                                                                   \
+		if (VMK_UNLIKELY(!(expr))) {                                   \
+			int *_i = NULL;                                        \
+			int _a;                                                \
+			vmk_WarningMessage("Assertion failed: \t");            \
+			vmk_WarningMessage("FILE: %s, FUNC: %s, LINE: %d\n",   \
+				__FILE__, __func__, __LINE__);                 \
+			_a = *_i;                                              \
+		}                                                              \
+	} while (0)
 
 typedef vmk_uint8   uint8_t;
 typedef vmk_uint16  uint16_t;

@@ -15,21 +15,32 @@
 struct rpc_msg;
 typedef void (*rpchandler_t)(struct rpc_msg *);
 
+#define _RPC_USE_SEMA_
+
+#ifdef _RPC_USE_SEMA_
 #define RPC_CHAN_LOCK(rcp)   vmk_SemaLock(&((rcp)->lock))
 #define RPC_CHAN_UNLOCK(rcp) vmk_SemaUnlock(&((rcp)->lock))
+#else
+#define RPC_CHAN_LOCK(rcp)   vmk_SpinlockLock(((rcp)->lock))
+#define RPC_CHAN_UNLOCK(rcp) vmk_SpinlockUnlock(((rcp)->lock))
+#endif
 
 typedef struct rpc_chan {
 	sock_handle_t   socket;
 	thread_pool_t   tp;
 	int             enabled;
-	uint32_t        seqid;
+	vmk_atomic64    seqid;
 	hash_table_t    hash;
 	bufpool_t       msgpool;
 	bufpool_t       ploadpool;
 	rpchandler_t    req_handler;
 	rpchandler_t    resp_handler;
 	pthread_t       recv_thread;
+#ifdef _RPC_USE_SEMA_
 	vmk_Semaphore   lock;
+#else
+	vmk_Lock        lock;
+#endif
 } rpc_chan_t;
 
 /*
@@ -56,7 +67,7 @@ typedef struct rpc_chan {
 #define RPC_MSG_SEQID(msgp) (msgp->hdr.seqid)
 
 typedef struct rpc_msghdr {
-	uint32_t seqid;
+	uint64_t seqid;
 	uint16_t type;
 	uint16_t msglen;
 	uint64_t payloadlen;

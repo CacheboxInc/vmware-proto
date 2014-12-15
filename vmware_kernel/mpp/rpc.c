@@ -3,6 +3,25 @@
 #include "rpc.h"
 #include "threadpool.h"
 
+static inline void dump_rpc_msghdr(rpc_msghdr_t *p)
+{
+	vmk_WarningMessage("\trpc_msghdr: %p\n", p);
+	vmk_WarningMessage("\t\tseqid        %lu\n", p->seqid);
+	vmk_WarningMessage("\t\ttype         %d\n", p->type);
+	vmk_WarningMessage("\t\tmsglen       %d\n", p->msglen);
+	vmk_WarningMessage("\t\tpayloadlen   %lu\n", p->payloadlen);
+	vmk_WarningMessage("\t\tstatus       %d\n", p->status);
+}
+
+static inline void dump_rpc_msg(rpc_msg_t *p)
+{
+	vmk_WarningMessage("rpc_msg_t:  %p\n", p);
+	vmk_WarningMessage("\tpayload      %p\n", p->payload);
+	vmk_WarningMessage("\tresp         %p\n", p->resp);
+	vmk_WarningMessage("\trcp          %p\n", p->rcp);
+	dump_rpc_msghdr(&p->hdr);
+}
+
 static inline int seqid_cmp(hash_entry_t *e, void *opaque)
 {
 	rpc_msg_t *m1 = container_of(e, rpc_msg_t, h_entry);
@@ -41,6 +60,12 @@ static inline void _rpc_response(rpc_chan_t *rcp, rpc_msg_t *resp)
 	RPC_CHAN_LOCK(rcp);
 	rc = hash_lookup(&rcp->hash, b, &e, resp);
 	if (rc < 0) {
+		RPC_CHAN_UNLOCK(rcp);
+		vmk_WarningMessage("**** %s: hash_lookup failed.\n", __func__);
+		vmk_WarningMessage("**** %s: hash_lookup failed.\n", __func__);
+		vmk_WarningMessage("**** %s: hash_lookup failed.\n", __func__);
+		vmk_WarningMessage("**** %s: hash_lookup failed.\n", __func__);
+		dump_rpc_msg(resp);
 		assert(0);
 		return;
 	}
@@ -174,7 +199,11 @@ static inline void _rpc_chan_deinit(rpc_chan_t *rcp)
 	bufpool_deinit(&rcp->ploadpool);
 	bufpool_deinit(&rcp->msgpool);
 	hash_deinit(&rcp->hash);
+#ifdef _RPC_USE_SEMA_
 	vmk_SemaDestroy(&rcp->lock);
+#else
+	vmk_SpinlockDestroy(rcp->lock);
+#endif
 	vmware_socket_sys_deinit();
 	memset(rcp, 0, sizeof(*rcp));
 }
@@ -236,10 +265,17 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 		goto error;
 	}
 
+#ifdef _RPC_USE_SEMA_
 	rc = vmk_BinarySemaCreate(&rcp->lock, module->mod_id, n);
 	if (rc < 0) {
 		goto error;
 	}
+#else
+	rc = pthread_mutex_init(&rcp->lock, n, module);
+	if (rc < 0) {
+		goto error;
+	}
+#endif
 
 	rcp->req_handler  = req_handler;
 	rcp->resp_handler = resp_handler;
@@ -247,7 +283,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	rcp->enabled      = 1;
 	rcp->seqid        = 1;
 
-	rc = thread_pool_init(&rcp->tp, n, module, 16);
+	rc = thread_pool_init(&rcp->tp, n, module, 16, 128);
 	if (rc < 0) {
 		goto error;
 	}
@@ -381,7 +417,7 @@ void rpc_msg_get(rpc_chan_t *rcp, int msgtype, size_t msglen, rpc_msg_t **msgpp)
 	rm->rcp = rcp;
 
 	RPC_SETMSGTYPE(rm, msgtype);
-	rm->hdr.seqid      = rcp->seqid++;
+	rm->hdr.seqid      = vmk_AtomicReadAdd64(&rcp->seqid, 1);
 	rm->hdr.msglen     = msglen;
 	rm->hdr.payloadlen = 0;
 

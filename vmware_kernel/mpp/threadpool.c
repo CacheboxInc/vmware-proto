@@ -92,11 +92,10 @@ void _thread_pool_deinit(thread_pool_t *tp)
 }
 
 int thread_pool_init(thread_pool_t *tp, const char *name,
-		module_global_t *module, int nthreads)
+		module_global_t *module, int nthreads, int nwork)
 {
 	int  i;
 	int  rc;
-	int  nwork;
 	int  nwork_max;
 	char n[128];
 	char n1[128];
@@ -113,7 +112,6 @@ int thread_pool_init(thread_pool_t *tp, const char *name,
 		return -1;
 	}
 
-	nwork     = 128;
 	nwork_max = nwork * 4;
 
 	rc = bufpool_init(&tp->pool, n, module, sizeof(struct work), nwork,

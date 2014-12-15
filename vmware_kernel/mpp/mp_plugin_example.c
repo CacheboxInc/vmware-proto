@@ -120,9 +120,7 @@ typedef struct ExampleDevice {
    vmk_ListLinks   resvSensitiveAbtQueue;  // d reservation sensitive abort queue
    vmk_Bool        resvUpdateInProgress;   // d reservation update in progress
 
-   vmk_uint32      nouse;
-   vmk_WorldID     sc_world;
-   rpc_chan_t      *rpc;
+   rpc_chan_t      *rcp;
    vmk_Socket      sock;
 } ExampleDevice;
 
@@ -160,6 +158,7 @@ typedef enum {
  */
 rpc_chan_t           rpc;
 static sock_handle_t sock = -1;
+thread_pool_t        send_tp;
 
 // Forward declarations
 
@@ -773,8 +772,7 @@ static void ExampleCompleteDeviceCommand(ExampleCommand *exCmd)
 
 	cmd->done(cmd);
 
-	vmk_WorldWakeup(exDev->nouse);
-	// ExampleDeviceStartCommand(exDev->device);
+	ExampleDeviceStartCommand(exDev->device);
 }
 
 /*
@@ -1411,6 +1409,11 @@ static inline vmk_Bool should_cb_handle(vmk_ScsiCommand *cmd)
 		break;
 	}
 
+	if (VMK_UNLIKELY(cmd->flags &
+				VMK_SCSI_COMMAND_FLAGS_RESERVATION_SENSITIVE)) {
+		return VMK_FALSE;
+	}
+
 	return cmd->isReadCdb || cmd->isWriteCdb;
 }
 
@@ -1423,11 +1426,6 @@ ExampleIssueCommand(vmk_ScsiDevice *scsiDev,
 	ExampleDevice *exDev = ExampleGetExDev(scsiDev);
 	ExamplePath *exPath;
 	vmk_Bool rc;
-
-	exCmd->exDev = exDev;
-	exCmd->scsiCmd = cmd;
-	exCmd->done = cmd->done;
-	exCmd->doneData = cmd->doneData;
 
 	vmk_SpinlockLock(exDev->lock);
 	ASSERT_CMD_IS_UNLINKED(exCmd);
@@ -1492,7 +1490,7 @@ ExampleIssueCommand(vmk_ScsiDevice *scsiDev,
 	if (rc == VMK_FALSE) {
 		status = vmk_ScsiIssueAsyncPathCommandDirect(exCmd->scsiPath, cmd);
 	} else {
-		status = cachebox_rw_cmd(exCmd, exDev->rpc);
+		status = cachebox_rw_cmd(exCmd, exDev->rcp);
 	}
 	if (status != VMK_OK) {
 		ExampleIssueFail(exCmd->scsiPath, cmd, status);
@@ -1711,6 +1709,16 @@ ExampleDeviceSchedStart(ExampleDevice *exDev,
    vmk_SpinlockUnlock(exDev->lock);
 }
 
+static inline void issue_cmd(work_t *w, void *data)
+{
+	ExampleCommand *exCmd    = data;
+	ExampleDevice   *exDev   = exCmd->exDev;
+	vmk_ScsiCommand *cmd     = exCmd->scsiCmd;
+	vmk_ScsiDevice  *scsiDev = exDev->device;
+
+	ExampleIssueCommand(scsiDev, cmd, exCmd);
+}
+
 /*
  ***********************************************************************
  * ExampleDeviceStartCommand --                                   */ /**
@@ -1742,6 +1750,7 @@ ExampleDeviceStartCommand(vmk_ScsiDevice *scsiDev)
 	do {
 		vmk_ScsiCommand *cmd;
 		ExampleCommand  *exCmd;
+		work_t          *w;
 
 		if (VMK_UNLIKELY(ExampleDevice_IsBlocked(exDev))) {
 			/*
@@ -1797,28 +1806,21 @@ ExampleDeviceStartCommand(vmk_ScsiDevice *scsiDev)
 					currentWorld);
 		}
 
-		ExampleIssueCommand(scsiDev, cmd, exCmd);
+		exCmd->exDev    = exDev;
+		exCmd->scsiCmd  = cmd;
+		exCmd->done     = cmd->done;
+		exCmd->doneData = cmd->doneData;
+
+		w               = new_work(&send_tp);
+		assert(w != NULL);
+
+		w->data    = exCmd;
+		w->work_fn = issue_cmd;
+		schedule_work(&send_tp, w);
 	} while (1);
 
 	/* Stop CPU accounting */
 	vmk_ServiceTimeChargeEndWorld(ioAcctCtx);
-
-	return VMK_OK;
-}
-
-static inline VMK_ReturnStatus cb_start_command(void *data)
-{
-	ExampleDevice    *ex_dev = data;
-	VMK_ReturnStatus s;
-
-	while (1) {
-		s = vmk_WorldWait((vmk_WorldEventID) &ex_dev->nouse,
-			VMK_LOCK_INVALID, VMK_TIMEOUT_UNLIMITED_MS,
-			"bhendi kam karna jara");
-		assert(s == VMK_OK);
-
-		ExampleDeviceStartCommand(ex_dev->device);
-	}
 
 	return VMK_OK;
 }
@@ -1828,17 +1830,16 @@ static inline void deinit_cachebox(void)
 	rpc_chan_t *rcp = &rpc;
 	rpc_chan_close(rcp);
 	rpc_chan_deinit(rcp);
-//	pthread_cancel(sc_world);
 }
 
 static inline VMK_ReturnStatus init_cachebox(void)
 {
-//	vmk_Bool        ps; /* thread pool started */
+	vmk_Bool        ps; /* thread pool started */
 	rpc_chan_t      *rcp;
 	module_global_t module;
 	int             rc;
 
-//	ps   = VMK_FALSE;
+	ps   = VMK_FALSE;
 	rcp  = &rpc;
 
 	_module_struct_init(&module);
@@ -1854,14 +1855,11 @@ static inline VMK_ReturnStatus init_cachebox(void)
 		return VMK_FAILURE;
 	}
 
-#if 0
-	rc = pthread_create(&ex_dev->sc_world, "sc_thread", &module,
-			cb_start_command, ex_dev);
+	rc = thread_pool_init(&send_tp, EXAMPLE_NAME, &module, 8, 1024);
 	if (rc < 0) {
 		goto error;
 	}
 	ps = VMK_TRUE;
-#endif
 
 	rc = client_setup(SIP, strlen(SIP), SPORT, CIP, strlen(CIP), CPORT, &sock);
 	if (rc < 0) {
@@ -1879,11 +1877,9 @@ static inline VMK_ReturnStatus init_cachebox(void)
 	return VMK_OK;
 
 error:
-#if 0
 	if (ps) {
-		pthread_cancel(ex_dev->sc_world);
+		thread_pool_deinit(&send_tp);
 	}
-#endif
 
 	vmware_socket_sys_deinit();
 	if (sock != -1) {
@@ -2846,19 +2842,8 @@ ExamplePathClaimEnd(vmk_ScsiPlugin *_plugin)
 				return status;
 			}
 
-			exDev->rpc   = &rpc;
-			exDev->nouse = 0;
-			rc = pthread_create(&exDev->sc_world, "sc_thread", &module,
-					cb_start_command, exDev);
-			if (rc < 0) {
-					vmk_ScsiFreeDevice(exDev->device);
-					exDev->device = NULL;
-					vmk_SemaUnlock(&deviceSema);
-					vmk_WarningMessage("Anup: thread creation failed.\n");
-				return VMK_FAILURE;
-			}
-
-			status = vmk_ScsiRegisterDevice(exDev->device, uids, 1);
+			exDev->rcp = &rpc;
+			status     = vmk_ScsiRegisterDevice(exDev->device, uids, 1);
 			if (status == VMK_OK) {
 				vmk_SpinlockLock(exDev->lock);
 				exDev->flags |= EXAMPLE_DEVICE_REGISTERED;
@@ -3181,7 +3166,7 @@ ExampleUnclaimPath(vmk_ScsiPath *path)
       ExampleDrainBusyCount(exDev);
       vmk_SpinlockUnlock(exDev->lock);
 
-      pthread_cancel(exDev->sc_world);
+      thread_pool_deinit(&send_tp);
 
       status = ExampleDestroyDevice(exDev);
       if (status != VMK_OK) {
@@ -4982,7 +4967,7 @@ VMK_ReturnStatus threadpool_test(void)
 
 	_module_struct_init(&module);
 
-	rc = thread_pool_init(&tp, "test", &module, 32);
+	rc = thread_pool_init(&tp, "test", &module, 32, 256);
 	if (rc < 0) {
 		vmk_WarningMessage("thread_pool_init failed");
 		return VMK_FAILURE;

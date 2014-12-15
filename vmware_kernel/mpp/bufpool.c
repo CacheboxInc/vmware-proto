@@ -15,7 +15,6 @@ int bufpool_init_reserve(bufpool_t *bp, const char *name,
 	size_t nmax)
 {
 	char             n[128];
-	VMK_ReturnStatus rc;
 	int              r;
 	dll_t            *buf;
 
@@ -69,7 +68,6 @@ void bufpool_deinit(bufpool_t *bp)
 {
 	int        rc;
 	dll_t      *dllp;
-	vmk_uint64 d = 1 * 1000 * 1000;
 
 	assert(bp != NULL);
 

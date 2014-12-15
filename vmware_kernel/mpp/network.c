@@ -128,7 +128,7 @@ static sock_handle_t socket(int domain, int type, int protocol)
 		vmk_WarningMessage("%s: vmware_socket_find_free failed\n", __func__);
 		return -1;
 	}
-	assert(vs->handle > 0 && vs->handle < MAX_SOCKETS);
+	assert(vs->handle >= 0 && vs->handle < MAX_SOCKETS);
 
 	rc = vmk_SocketCreate(domain, type, protocol, &vs->sock);
 	if (rc != VMK_OK) {
@@ -256,7 +256,6 @@ static ssize_t safe_read(sock_handle_t handle, char *buf, size_t count)
 	char    *b;
 	ssize_t bc;
 	ssize_t rc;
-	int 	errno;
 
 	b  = buf;
 	bc = 0;
@@ -307,7 +306,6 @@ static ssize_t safe_write(sock_handle_t handle, char *buf, size_t count)
 	char    *b;
 	ssize_t bc;
 	ssize_t rc;
-	int 	errno;
 
 	b  = buf;
 	bc = 0;
