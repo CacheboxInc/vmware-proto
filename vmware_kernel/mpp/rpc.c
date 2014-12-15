@@ -61,10 +61,6 @@ static inline void _rpc_response(rpc_chan_t *rcp, rpc_msg_t *resp)
 	rc = hash_lookup(&rcp->hash, b, &e, resp);
 	if (rc < 0) {
 		RPC_CHAN_UNLOCK(rcp);
-		vmk_WarningMessage("**** %s: hash_lookup failed.\n", __func__);
-		vmk_WarningMessage("**** %s: hash_lookup failed.\n", __func__);
-		vmk_WarningMessage("**** %s: hash_lookup failed.\n", __func__);
-		vmk_WarningMessage("**** %s: hash_lookup failed.\n", __func__);
 		dump_rpc_msg(resp);
 		assert(0);
 		return;

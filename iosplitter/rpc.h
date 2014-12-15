@@ -30,7 +30,7 @@ typedef struct rpc_chan {
 	sock_handle_t   socket;
 	thread_pool_t   tp;
 	int             enabled;
-	uint32_t        seqid;
+	uint64_t        seqid;
 	hash_table_t    hash;
 	bufpool_t       msgpool;
 	bufpool_t       ploadpool;
@@ -64,7 +64,7 @@ typedef struct rpc_chan {
 #define RPC_MSG_SEQID(msgp) (msgp->hdr.seqid)
 
 typedef struct rpc_msghdr {
-	uint32_t seqid;
+	uint64_t seqid;
 	uint16_t type;
 	uint16_t msglen;
 	uint64_t payloadlen;
