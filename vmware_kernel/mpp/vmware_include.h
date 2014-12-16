@@ -2,6 +2,7 @@
 #define __VMWARE_INCLUDE__
 
 #include "vmkapi.h"
+#include "vmkapi_socket.h"
 #include <stddef.h>
 
 #define memset	vmk_Memset
