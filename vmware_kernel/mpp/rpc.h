@@ -26,7 +26,7 @@ typedef void (*rpchandler_t)(struct rpc_msg *);
 #endif
 
 typedef struct rpc_chan {
-	sock_handle_t   socket;
+	vmk_Socket      socket;
 	thread_pool_t   tp;
 	int             enabled;
 	vmk_atomic64    seqid;
@@ -86,7 +86,7 @@ typedef struct rpc_msg {
 
 rpc_chan_t * rpc_chan_new(void);
 void rpc_chan_free(rpc_chan_t *rcp);
-int rpc_chan_init(rpc_chan_t *, module_global_t *module, sock_handle_t,
+int rpc_chan_init(rpc_chan_t *, module_global_t *module, vmk_Socket,
 		size_t nway, int reserve, size_t msgsz, size_t hashsz,
 		rpchandler_t req_h, rpchandler_t resp_h);
 void rpc_chan_deinit(rpc_chan_t *rcp);

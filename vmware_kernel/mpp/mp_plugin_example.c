@@ -157,7 +157,7 @@ typedef enum {
  * CACHEBOX VARIABLES
  */
 rpc_chan_t           rpc;
-static sock_handle_t sock = -1;
+static vmk_Socket    sock = NULL;
 thread_pool_t        send_tp;
 
 // Forward declarations
@@ -1830,6 +1830,7 @@ static inline void deinit_cachebox(void)
 	rpc_chan_t *rcp = &rpc;
 	rpc_chan_close(rcp);
 	rpc_chan_deinit(rcp);
+	thread_pool_deinit(&send_tp);
 }
 
 static inline VMK_ReturnStatus init_cachebox(void)
@@ -1849,11 +1850,6 @@ static inline VMK_ReturnStatus init_cachebox(void)
 	 *  - sock must be part of ExampleDevice. Avoid using global struct.
 	 *  - rpc_chan_t must be part of ExampleDevice
 	 */
-
-	rc = vmware_socket_sys_init(EXAMPLE_NAME, &module);
-	if (rc < 0) {
-		return VMK_FAILURE;
-	}
 
 	rc = thread_pool_init(&send_tp, EXAMPLE_NAME, &module, 8, 1024);
 	if (rc < 0) {
@@ -1881,8 +1877,7 @@ error:
 		thread_pool_deinit(&send_tp);
 	}
 
-	vmware_socket_sys_deinit();
-	if (sock != -1) {
+	if (sock != NULL) {
 		socket_close(sock);
 	}
 	return VMK_FAILURE;
@@ -2843,6 +2838,7 @@ ExamplePathClaimEnd(vmk_ScsiPlugin *_plugin)
 			}
 
 			exDev->rcp = &rpc;
+			exDev->sock = sock;
 			status     = vmk_ScsiRegisterDevice(exDev->device, uids, 1);
 			if (status == VMK_OK) {
 				vmk_SpinlockLock(exDev->lock);
@@ -3165,8 +3161,6 @@ ExampleUnclaimPath(vmk_ScsiPath *path)
       exDev->flags |= EXAMPLE_DEVICE_REMOVING;
       ExampleDrainBusyCount(exDev);
       vmk_SpinlockUnlock(exDev->lock);
-
-      thread_pool_deinit(&send_tp);
 
       status = ExampleDestroyDevice(exDev);
       if (status != VMK_OK) {
@@ -5087,17 +5081,12 @@ VMK_ReturnStatus rpc_test(void)
 	module_global_t module;
 	rpc_chan_t      rpc;
 	int             rc;
-	sock_handle_t   sock;
+	vmk_Socket      sock;
 	pthread_t       thread;
 	vmk_Bool        rpc_initialized = VMK_FALSE;
 	vmk_Bool        sock_initialized = VMK_FALSE;
 
 	_module_struct_init(&module);
-
-	rc = vmware_socket_sys_init(EXAMPLE_NAME, &module);
-	if (rc < 0) {
-		return VMK_FAILURE;
-	}
 
 	rc = client_setup(SIP, strlen(SIP), SPORT, CIP, strlen(CIP), CPORT, &sock);
 	if (rc < 0) {
@@ -5133,7 +5122,6 @@ error:
 	if (sock_initialized == VMK_TRUE) {
 		socket_close(sock);
 	}
-	vmware_socket_sys_deinit();
 	return VMK_FAILURE;
 }
 

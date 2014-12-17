@@ -200,12 +200,11 @@ static inline void _rpc_chan_deinit(rpc_chan_t *rcp)
 #else
 	vmk_SpinlockDestroy(rcp->lock);
 #endif
-	vmware_socket_sys_deinit();
 	memset(rcp, 0, sizeof(*rcp));
 }
 
 int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
-		sock_handle_t socket, size_t nway, int reserve, size_t msgsz,
+		vmk_Socket socket, size_t nway, int reserve, size_t msgsz,
 		size_t hashsz, rpchandler_t req_handler,
 		rpchandler_t resp_handler)
 {
