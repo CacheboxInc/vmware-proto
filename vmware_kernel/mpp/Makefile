@@ -75,7 +75,7 @@ DEV_BUILDTYPE = beta
 # kmdk.inc brought in below uses it as the base for defining
 # VMW_ALL_VMK_CFILES.
 DEV_VMK_CFILES = mp_plugin_example.c mgmtInterface.c
-DEV_VMK_CFILES += queue.c hash.c network.c bufpool.c threadpool.c rpc.c
+DEV_VMK_CFILES += queue.c hash.c network.c bufpool.c threadpool.c rpc.c stats.c
 DEV_UW_CFILES = mgmtInterface.c userProgram.c
 
 ################
