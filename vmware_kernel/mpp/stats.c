@@ -185,6 +185,10 @@ static inline void _cb_stat_funp_update(cb_stat_t *stat)
 	t  = vmk_AtomicRead64(&stat->f.total);
 	c  = vmk_AtomicRead64(&stat->f.calls);
 
+	if (t == 0 || c == 0) {
+		return;
+	}
+
 	a  = t / c;
 	us = vmk_TimerTCToUS(a);
 	ms = vmk_TimerTCToMS(a);
@@ -219,11 +223,14 @@ static void _cb_stats_update(vmk_TimerCookie data)
 	cb_stat_t     *stat;
 	VMK_ReturnStatus s;
 
-	if (DLL_ISEMPTY(&stats->stats_list)) {
+	assert(stats);
+
+	if (DLL_ISEMPTY(&stats->stats_list) || !stats->initialized) {
 		return;
 	}
 
 	assert(stats->initialized == VMK_TRUE);
+	assert(stats->module);
 
 	rc = pthread_mutex_lock(stats->lock);
 	assert(rc == 0);
@@ -241,7 +248,8 @@ static void _cb_stats_update(vmk_TimerCookie data)
 
 	s = vmk_TimerSchedule(stats->timer_q, _cb_stats_update, stats,
 		VMK_USEC_PER_SEC, VMK_TIMER_DEFAULT_TOLERANCE,
-		VMK_TIMER_ATTR_NONE, stats->module->lockd_id, 1, &stats->timer);
+		VMK_TIMER_ATTR_NONE, VMK_LOCKDOMAIN_INVALID,
+		VMK_SPINLOCK_UNRANKED, &stats->timer);
 	assert(s == VMK_OK);
 }
 
@@ -277,9 +285,10 @@ int cb_stat_sys_init(cb_stat_sys_t *stats, int nstats, const char *name,
 		return -1;
 	}
 
-	s = vmk_TimerSchedule(stats->timer_q, _cb_stats_update, &stats,
+	s = vmk_TimerSchedule(stats->timer_q, _cb_stats_update, stats,
 		VMK_USEC_PER_SEC, VMK_TIMER_DEFAULT_TOLERANCE,
-		VMK_TIMER_ATTR_NONE, module->lockd_id, 1, &stats->timer);
+		VMK_TIMER_ATTR_NONE, VMK_LOCKDOMAIN_INVALID,
+		VMK_SPINLOCK_UNRANKED, &stats->timer);
 
 	if (s != VMK_OK) {
 		vmk_TimerQueueDestroy(stats->timer_q);
@@ -301,7 +310,7 @@ int cb_stat_sys_deinit(cb_stat_sys_t *stats)
 
 	assert(DLL_ISEMPTY(&stats->stats_list));
 	vmk_TimerCancel(stats->timer, VMK_TRUE);
-	vmk_TimerQueueDestroy(&stats->timer_q);
+	vmk_TimerQueueDestroy(stats->timer_q);
 	pthread_mutex_destroy(stats->lock);
 	return 0;
 }

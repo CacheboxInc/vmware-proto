@@ -2,6 +2,9 @@
 #include "vmware_include.h"
 #include "rpc.h"
 #include "threadpool.h"
+#include "stats.h"
+
+extern cb_stat_t recv_tp_work_q_stat;
 
 static inline void dump_rpc_msghdr(rpc_msghdr_t *p)
 {
@@ -79,6 +82,8 @@ static void _rpc_recv_handler(work_t *w, void *data)
 {
 	rpc_msg_t  *msgp;
 	rpc_chan_t *rcp;
+
+	cb_stat_exit(&recv_tp_work_q_stat, 0);
 
 	msgp = (rpc_msg_t *) data;
 	rcp  = msgp->rcp;
@@ -170,6 +175,8 @@ static VMK_ReturnStatus rpc_recv_thread(void *args)
 		w          = new_work(&rcp->tp);
 		w->data    = msgp;
 		w->work_fn = _rpc_recv_handler;
+
+		cb_stat_enter(&recv_tp_work_q_stat, NULL);
 		rc         = schedule_work(&rcp->tp, w);
 		assert(rc  == 0);
 	}

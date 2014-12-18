@@ -20,6 +20,7 @@
 #include "rpc.h"
 #include "network.h"
 #include "tst-rpc.h"
+#include "stats.h"
 
 VMK_ReturnStatus start_test_thread(void);
 
@@ -158,6 +159,11 @@ typedef enum {
  */
 rpc_chan_t           rpc;
 static vmk_Socket    sock = NULL;
+static cb_stat_sys_t stat_sys;
+static cb_stat_t     rpc_req_fun_stat;
+static cb_stat_t     sg_cp_fun_stat;
+static cb_stat_t     send_tp_work_q_stat;
+cb_stat_t     recv_tp_work_q_stat;
 thread_pool_t        send_tp;
 
 // Forward declarations
@@ -1201,6 +1207,7 @@ static int resp_read_cmd(rpc_chan_t *rcp, rpc_msg_t *m)
 	uint64_t          len;
 	char              *p;
 	VMK_ReturnStatus  s;
+	stat_handle_t     h;
 
 	assert(m->hdr.status == 0);
 
@@ -1217,7 +1224,9 @@ static int resp_read_cmd(rpc_chan_t *rcp, rpc_msg_t *m)
 		assert(resp->payload != NULL);
 
 		p = resp->payload;
+		cb_stat_enter(&sg_cp_fun_stat, &h);
 		s = vmk_SgCopyTo(cmd->sgArray, p, r->len);
+		cb_stat_exit(&sg_cp_fun_stat, h);
 		assert(s == VMK_OK);
 		if (s != VMK_OK) {
 			/*
@@ -1289,6 +1298,7 @@ static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	vmk_ByteCount    bc;
 	read_cmd_t       *r;
 	int              rc;
+	stat_handle_t    h;
 
 	cmd = ex_cmd->scsiCmd;
 	vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
@@ -1307,7 +1317,9 @@ static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	r->offset = offset;
 	r->len    = len;
 
+	cb_stat_enter(&rpc_req_fun_stat, &h);
 	rc        = rpc_async_request(rcp, m);
+	cb_stat_exit(&rpc_req_fun_stat, h);
 	if (rc < 0) {
 		goto error;
 	}
@@ -1332,6 +1344,7 @@ static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	VMK_ReturnStatus s;
 	write_cmd_t      *w;
 	int              rc;
+	stat_handle_t    h;
 
 	cmd = ex_cmd->scsiCmd;
 	vmk_ScsiGetLbaLbc(cmd->cdb, cmd->cdbLen, VMK_SCSI_CLASS_DISK,
@@ -1353,7 +1366,9 @@ static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 		assert(m->payload != NULL);
 		assert(m->hdr.payloadlen != 0);
 
+		cb_stat_enter(&sg_cp_fun_stat, &h);
 		s = vmk_SgCopyFrom(p, cmd->sgArray, len);
+		cb_stat_exit(&sg_cp_fun_stat, h);
 		if (s != VMK_OK) {
 			goto error;
 		}
@@ -1363,7 +1378,9 @@ static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	w         = (write_cmd_t *) &m->hdr;
 	w->offset = offset;
 	w->len    = len;
+	cb_stat_enter(&rpc_req_fun_stat, &h);
 	rc        = rpc_async_request(rcp, m);
+	cb_stat_exit(&rpc_req_fun_stat, h);
 	if (rc < 0) {
 		goto error;
 	}
@@ -1716,6 +1733,7 @@ static inline void issue_cmd(work_t *w, void *data)
 	vmk_ScsiCommand *cmd     = exCmd->scsiCmd;
 	vmk_ScsiDevice  *scsiDev = exDev->device;
 
+	cb_stat_exit(&send_tp_work_q_stat, 0);
 	ExampleIssueCommand(scsiDev, cmd, exCmd);
 }
 
@@ -1816,6 +1834,8 @@ ExampleDeviceStartCommand(vmk_ScsiDevice *scsiDev)
 
 		w->data    = exCmd;
 		w->work_fn = issue_cmd;
+
+		cb_stat_enter(&send_tp_work_q_stat, NULL);
 		schedule_work(&send_tp, w);
 	} while (1);
 
@@ -1831,6 +1851,13 @@ static inline void deinit_cachebox(void)
 	rpc_chan_close(rcp);
 	rpc_chan_deinit(rcp);
 	thread_pool_deinit(&send_tp);
+
+	cb_stat_deinit(&rpc_req_fun_stat);
+	cb_stat_deinit(&sg_cp_fun_stat);
+	cb_stat_deinit(&send_tp_work_q_stat);
+	cb_stat_deinit(&recv_tp_work_q_stat);
+
+	cb_stat_sys_deinit(&stat_sys);
 }
 
 static inline VMK_ReturnStatus init_cachebox(void)
@@ -1844,6 +1871,11 @@ static inline VMK_ReturnStatus init_cachebox(void)
 	rcp  = &rpc;
 
 	_module_struct_init(&module);
+
+	rc = cb_stat_sys_init(&stat_sys, 16, EXAMPLE_NAME, &module);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
 
 	/*
 	 * TODO:
@@ -1870,9 +1902,18 @@ static inline VMK_ReturnStatus init_cachebox(void)
 		goto error;
 	}
 
+	cb_stat_init(&stat_sys, &rpc_req_fun_stat, FUN_PROFILE, "req_fu");
+	cb_stat_init(&stat_sys, &sg_cp_fun_stat, FUN_PROFILE, "sg_copy");
+	cb_stat_init(&stat_sys, &send_tp_work_q_stat, QUEUE, "send-w-q");
+	cb_stat_init(&stat_sys, &recv_tp_work_q_stat, QUEUE, "recv-w-q");
+
 	return VMK_OK;
 
 error:
+	if (stat_sys.initialized == VMK_TRUE) {
+		cb_stat_sys_deinit(&stat_sys);
+	}
+
 	if (ps) {
 		thread_pool_deinit(&send_tp);
 	}
