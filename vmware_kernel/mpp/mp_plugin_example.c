@@ -1883,7 +1883,7 @@ static inline VMK_ReturnStatus init_cachebox(void)
 	 *  - rpc_chan_t must be part of ExampleDevice
 	 */
 
-	rc = thread_pool_init(&send_tp, EXAMPLE_NAME, &module, 8, 1024);
+	rc = thread_pool_init(&send_tp, EXAMPLE_NAME, &module, 4, 1024);
 	if (rc < 0) {
 		goto error;
 	}

@@ -40,23 +40,25 @@ static inline int _cb_stat_queue_exit(cb_stat_t *stat)
 	return 0;
 }
 
-static inline void _cb_stat_queue_update(cb_stat_t *stat)
+static inline void _cb_stat_queue_update(cb_stat_t *stat, int samples, vmk_Bool print)
 {
-	static const vmk_uint64 multi = 0.025;
-	vmk_uint64              v     = vmk_AtomicRead64(&stat->q.running);
+	vmk_uint64 r = vmk_AtomicRead64(&stat->q.running);
+	vmk_uint64 a;
 
 	assert(stat && stat->stats);
 	assert(stat->type == QUEUE);
 	assert(stat->stats->initialized == VMK_TRUE);
+	assert(samples != 0);
 
-	if (stat->q.avg == 0) {
-		stat->q.avg = v;
-	} else {
-		stat->q.avg = (multi * v) + ((1 - multi) * stat->q.avg);
+	stat->q.total += r;
+	if (print == VMK_FALSE) {
+		return;
 	}
 
-	vmk_WarningMessage("=== STAT %s QUEUE AVG = %lu\n",
-			stat->name, stat->q.avg);
+	a             = stat->q.total / samples;
+	stat->q.total = 0;
+
+	vmk_WarningMessage("=== STAT %s QUEUE AVG = %lu\n", stat->name, a);
 }
 
 static inline int _cb_stat_funp_init(cb_stat_t *stat)
@@ -170,7 +172,7 @@ static inline int _cb_stat_funp_exit(cb_stat_t *stat, stat_handle_t handle)
 	return 0;
 }
 
-static inline void _cb_stat_funp_update(cb_stat_t *stat)
+static inline void _cb_stat_funp_update(cb_stat_t *stat, int samples, vmk_Bool print)
 {
 	vmk_uint64 t;
 	vmk_uint64 c;
@@ -181,6 +183,10 @@ static inline void _cb_stat_funp_update(cb_stat_t *stat)
 	assert(stat && stat->stats);
 	assert(stat->stats->initialized == VMK_TRUE);
 	assert(stat->type == FUN_PROFILE);
+
+	if (print == VMK_FALSE) {
+		return;
+	}
 
 	t  = vmk_AtomicRead64(&stat->f.total);
 	c  = vmk_AtomicRead64(&stat->f.calls);
@@ -197,7 +203,7 @@ static inline void _cb_stat_funp_update(cb_stat_t *stat)
 			"or %lu (us) \n", stat->name, c, ms, us);
 }
 
-static inline void _cb_stat_update(cb_stat_t *stat)
+static inline void _cb_stat_update(cb_stat_t *stat, int samples, vmk_Bool print)
 {
 	assert(stat && stat->stats);
 	assert(stat->type > NO_STAT && stat->type < NSTATS);
@@ -207,10 +213,10 @@ static inline void _cb_stat_update(cb_stat_t *stat)
 	default:
 		assert(0);
 	case QUEUE:
-		_cb_stat_queue_update(stat);
+		_cb_stat_queue_update(stat, samples, print);
 		break;
 	case FUN_PROFILE:
-		_cb_stat_funp_update(stat);
+		_cb_stat_funp_update(stat, samples, print);
 		break;
 	}
 }
@@ -222,6 +228,8 @@ static void _cb_stats_update(vmk_TimerCookie data)
 	dll_t         *l;
 	cb_stat_t     *stat;
 	VMK_ReturnStatus s;
+	int              samples;
+	vmk_Bool         p;
 
 	assert(stats);
 
@@ -232,22 +240,36 @@ static void _cb_stats_update(vmk_TimerCookie data)
 	assert(stats->initialized == VMK_TRUE);
 	assert(stats->module);
 
+	p       = VMK_FALSE;
+	samples = ++stats->sample;
+	if ((samples % 100) == 0) {
+		p             = VMK_TRUE;
+		stats->sample = 0;
+	}
+
+	if (p == VMK_TRUE) {
+		vmk_WarningMessage("$$$$$$$ STATS PRINTS START $$$$$$$$\n");
+	}
+
 	rc = pthread_mutex_lock(stats->lock);
 	assert(rc == 0);
 
 	l = DLL_NEXT(&stats->stats_list);
 	while (l != &stats->stats_list) {
 		stat = container_of(l, cb_stat_t, list);
-		_cb_stat_update(stat);
+		_cb_stat_update(stat, samples, p);
 
 		l = DLL_NEXT(l);
 	}
 
 	rc = pthread_mutex_unlock(stats->lock);
 	assert(rc == 0);
+	if (p == VMK_TRUE) {
+		vmk_WarningMessage("$$$$$$$ STATS PRINTS END $$$$$$$$\n");
+	}
 
 	s = vmk_TimerSchedule(stats->timer_q, _cb_stats_update, stats,
-		VMK_USEC_PER_SEC, VMK_TIMER_DEFAULT_TOLERANCE,
+		VMK_USEC_PER_MSEC * 100, VMK_TIMER_DEFAULT_TOLERANCE,
 		VMK_TIMER_ATTR_NONE, VMK_LOCKDOMAIN_INVALID,
 		VMK_SPINLOCK_UNRANKED, &stats->timer);
 	assert(s == VMK_OK);
@@ -286,7 +308,7 @@ int cb_stat_sys_init(cb_stat_sys_t *stats, int nstats, const char *name,
 	}
 
 	s = vmk_TimerSchedule(stats->timer_q, _cb_stats_update, stats,
-		VMK_USEC_PER_SEC, VMK_TIMER_DEFAULT_TOLERANCE,
+		VMK_USEC_PER_MSEC * 100, VMK_TIMER_DEFAULT_TOLERANCE,
 		VMK_TIMER_ATTR_NONE, VMK_LOCKDOMAIN_INVALID,
 		VMK_SPINLOCK_UNRANKED, &stats->timer);
 
