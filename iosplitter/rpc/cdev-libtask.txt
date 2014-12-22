@@ -1,0 +1,348 @@
+CVA IMPLEMENTATION NOTES USING LIBTASK
+
+INTRODUCTION TO LIBTASK AND COROUTINES
+	libtask coroutines are called tasks.
+	A new task is created by taskcreate(fn, void *arg, int stacksize).
+	the new task is immediately started and it continues until:
+		return; // return control to caller of taskcreate.
+		taskyield(); // transfer control to another ready task
+		taskexit(int status); // exit current task. last task calls exit.
+		taskdelay(unsigned int ms); // transfer control for t >= ms
+
+	pseudo-blocking
+		instead of blocking, control is transferred to other tasks until
+		this task becomes ready to run. Examples:
+		
+		fdread(int fd, void *buf, int nbytes); fd should be non-blocking.
+		Hidden task named fdtask will reschedule the task when fd is ready.
+		fdwrite() is similar.
+		These calls can be used on files as well as socket fd's, I am sure.
+	Rendezvous
+		A 'Rendez' is a condition variable. tasksleep(Rendez*) puts a task
+		to sleep that gets woken up when another task calls 
+		taskwakeup or taskwakeupall. 
+		Notice, no associated mutex lock is needed.
+		
+	Waiting on a buffer pool
+		With a fixed size pool of buffers, a task needs to yield if the pool
+		is empty. Simply put a Rendez in the pool head, and
+		use tasksleep and taskwakeup.
+		
+	Pseudo-locks
+		There is a mutex-like lock called QLock and a reader-writer lock 
+		called RWLock. Tasks can serialize sending of rpc messages on
+		a single socket fd with a Qlock.
+	
+	Channel
+		Channels are buffered pipes for inter-task communication.
+		Channel* chancreate(int elemsize, int bufsize); creates a channel
+		with a fixed element size. There are send and receive calls to
+		transfer one element at a time. syntactic sugar to transfer ulong and
+		pointers.
+		For now, I don't see where this could be used in CVA architecture.
+	
+	Wrapper functions for listen, accept, connect 
+		netannounce, netaccept, netdial
+		warning: these functions may block.
+		
+CVA OVERALL ARCHITECTURE USING LIBTASK
+	Server:
+		listen on well-known port, accept a connection from an RPC client.
+		Start a pthread to service the RPC client.
+		
+		The pthread starts a task that keeps reading rpc requests from
+		the sock fd.
+		When a rpc request is read in, a task is created to handle the request.
+			rpc_do_request(rc, msgp);
+			This has mostly straight line code to service the request.
+			The task will sleep on pseudo-blocking calls.
+		Alternatively, as task create may fail, create an initial set of request 
+		handler tasks that consume requests from a queue. This also provides
+		flow control.
+		The first rpc will be DEVICE_OPEN. A cache device is opened,
+		corresponding vssd devices are opened, a thread-local struct cdevic
+		is also set up. Pre-filled buffer pools are created. request handler
+		tasks are created.
+		
+		Buffer pools
+			We use fixed size structure pools with low and high watermarks. 
+			Pool is a queue_t with an embedded Rendez. 
+			*_get (pseudo-blocking)and *_put.
+			These pools are thread-local (i.e. session local). 
+			Separate pools exist for:
+				rpc_msg_t
+				data buffer
+				vssd metadata structures (may be more than one pool)
+		
+		Modules
+			Out of all the modules, only cache device mgr needs to create
+			new tasks. The other modules are written as a set of functions
+			that are designed to run in a task context.
+			The list of modules is:
+				cdev.c cache device manager
+				rpc.c rpc using libtask (rpc client and rpc server)
+				dtm.c DTM
+				vssd.c vSSD
+			tdrv.c generic unit test driver for CVA modules bottom up.
+			cvacli.c remote client to test CVA modules top down.
+		
+OUTLINE OF CODE FLOW FOR AN RPC WRITE REQUEST
+	1. rpc task is started during accept
+	2. rpc task creates a thread-local request queue, buffer pools, etc
+		by calling appropriate init functions in respective modules.
+	3. rpc task gets a request from socket fd = msgp.
+	4. rpc task puts msgp (with payload) into request queue
+	5. request handler task dequeues a msgp
+	6. request handler finds msgp->type == WRITEP1, calls do_writep1(msgp)
+	7. do_writep1 looks up cache device state that was set up during OPEN
+		sets up a tran_t on stack, calls vssd_writep1(vhandle, tranp, msgp)
+		on each associated vssd
+		prepare msgp for response
+		send response on socket fd
+		return to request handler task
+	8.	request handler task loops from step 5.
+	9. vssd_writep1 executes caching logic 
+			read metadata into private buffer  (may sleep for buffer, read)
+			write payload to correct location
+			prepare and write transaction record into log buffer
+			sleep until log buffer is flushed
+			return status
+
+BARRIER SYNCHRONIZATION
+	Sometimes we want to start several tasks, but then wait for them to complete before
+	we fire the next batch. I wrote libtask-based primitives in barrier.c.
+	task_barrier_t 
+	task_barrier_init(task_barrier_t *bp, int ntasks); // create a barrier
+	task_barrier_wait(task_barrier_t *bp); // each of n callers blocks until all have called.
+	
+FIXES THAT MAY BE REQUIRED IN LIBTASK LIBRARY
+	1. taskcreate calls abort() if malloc fails. In many places.
+		Should this return error that caller can handle, by retrying?
+	2. fd.c has a system task named fdtask that calls poll().
+		would epoll prove better? 
+		http://stackoverflow.com/questions/4093185/whats-the-difference-between-epoll-poll-threadpool
+	3. libtask uses a set of global variables (task contexts, epoll fd array)
+		that will be shared by all sessions that are started on one CVA.
+		This may create scalability issues and libtask may need tweaking. 
+	4. libtask doesn't support pread and pwrite. Need to add fdpwrite and fdpread.
+		Right now I am using lseek followed by fdread / fdwrite, but a single syscall is better.
+	5. libtask calls exit at various places. We don't want the CVA to terminate, only the current pthread to terminate.
+	
+MORE RESLIENT LIBTASK
+	Need to modify task.c to fix #1 and fix #5 (see previous section, "FIXES ...").
+	[TBD]
+	
+PSEUDO-BLOCKING READ AND WRITE FOR LIBAIO AND SOCKET FD
+	This is fix #2 plus fix #4 (see previous section, "FIXES ...").
+	We implement our own variants of fdread and fdwrite, described next.
+	taskio_init();
+		creates io_context, epollfd, eventfd. 
+		registers eventfd (similar to task_sockfd_register).
+		Start a system task aiotask. 
+		
+	Register each opened socket using task_sockfd_register(int fd, int rw).
+		common function that handles inline functions task_sockfd_register and task_eventfd_register
+		task_fd_register(uint32_t tasktype, int fd, int rw); 
+			tasktype = 1 for libaio (then fd is eventfd),  
+			tasktype = 2 for socket (then fd is socket fd)
+			This initializes an appropriate TaskSocketContext in global thread-local storage, 
+			and also calls the appropriate epoll_ctl to register the fd for epoll.
+	
+	inline int task_netread(fd, buf, nbytes); 
+	inline int task_netwrite(fd, buf, nbytes); 
+	int task_netrw(fd, buf, nbytes, int rw);
+		Pseudo-blocking recv and send on a network socket. Returns 0 for success else error code.
+		They work only with network sockets (also pipes?), not with file or disk io.
+		ONLY ONE TASK AT A TIME can be in a task_netread on a given fd. Similarly
+		only one task at a time can be in task_netwrite on a given fd. But it is allowed
+		to have one reader and one writer on a single fd at the same time.
+		
+	inline int task_aioread(fd, buf, nbytes, offset);
+	inline int task_aiowrite(fd, buf, nbytes, offset);
+	int task_aiorw(fd, buf, nbytes, offset, int rw);
+		Pseudo-blocking pread and pwrite using libaio. Returns 0 for success else error code.
+		They work only with file or disks.
+		Unlike task_netrw, taskaio_rw supports multiple concurrent readers and writers 
+		on same fd.
+
+	A NOTE ON IO COMPLETION FOR LIBAIO REQUESTS
+		task_aiorw() 
+			has one LibaioState ls and one iocb structure cb on its stack.
+			ls.waiter is set to current task pointer
+			cb.data = &ls; set eventfd in cb.
+			submit aio request
+			task yield
+		aio_task()
+			epoll_wait() reaps a struct epoll_event for eventfd
+			read eventfd to get n = number of io events
+			io_getevents() reaps n struct io_event
+			for each struct io_event ep:
+				struct iocb *cbp = ep->obj;  // This gets back copy of cb
+				LibaioState *lsp = ep->data  // This is same ls on task_aiorw stack
+				call taskready() to put lsp->waiter on runnable queue
+				
+	A NOTE ON IO COMPLETION FOR SOCKET IO
+		task_netrw(fd, ...)
+			lookup TaskSocketContext *tscp from the fd
+			set tscp->reader = taskrunning; // or tscp->writer for WRITE
+			task yield
+		aio_task()
+			epoll_wait() reaps a struct epoll_event for socket fd
+			TaskSocketContext *tscp from 
+			
+	A NOTE ON HOW TO USE TASKIO
+		1. taskio_init(); check for error
+		2. task_fd_register( incoming socket );
+		3. taskio_start(); start the epoll loop
+		4. Let the request handler enter loop doing task_netread(incoming socket)
+		5.  When an open request is received, 
+				vio_open() : 
+					case local: creates dev fd 
+					case remote open sock fd, call task_fd_register.
+		6. When a read or write request is received,
+				vio_writep1() or vio_read()
+		
+	SOFTWARE DESIGN:
+		taskio.h and taskio.c
+
+	WARNING: First two members must be same for next three structures.
+	struct TaskContext {
+		uint32_t	tasktype;
+		int			fd;
+	};
+	
+	struct TaskLibaioContext {
+		uint32_t	tasktype;
+		int			eventfd;
+		int			result;
+		Task		*task;
+	};
+	
+	struct TaskSocketContext {
+		uint32_t	tasktype; // TASKIO_LIBAIO or TASKIO_SOCK
+		int			sockfd;
+		int			bits; 	// EPOLLIN EPOLLOUT
+		Task		*reader;
+		Task		*writer;
+	};
+	
+	struct LibaioState {
+		Task	*waiter;
+		int		res;
+		int		res2;
+	};
+	
+	ContextContainer: 
+		This is an associative array that stores {key = fd, value = TaskContext *p} pairs.
+		p is polymorphic, may actually point to TaskLibaioContext or TaskSocketContext.
+		I am not putting in pseudo-code for this piece.
+		
+	
+	aiotask()
+	{
+		tasksystem();  // exclude this task from blocking exit
+		verify global thread-local structures to manage the io are initialized
+		forever do:
+			while(taskyield() > 0){ /* do nothing */ } // wait until all other tasks sleep
+			epoll_wait(task_epollfd, events, N, -1); // sleep until some fd is ready
+			for each ev in struct epoll_event events[] {
+				// 
+				TaskSocketContext *tscp = ev.data.ptr;
+				switch(tscp->tasktype) {
+					case TASKIO_SOCK: 
+						if (ev.events & EPOLLOUT) {
+							taskready(tscp->writer); 
+						}
+						if (ev.events & EPOLLIN) {
+							taskready(tscp->reader);
+						}
+						break;
+					case TASKIO_LIBAIO:
+						// more correct to use TaskLibaioContext *tlcp = tscp; but it is all the same.
+						n = read(tscp->fd, &uint64, 8);
+						io_getevents(array of n struct io_event ioevents[]);
+						for each ioev in ioevents {
+							struct iocb * ip = ioev.obj
+							struct LibaioState *xp = ip->data; //Do we need anything else from ip?
+							//ioev->res, ioev->res2 contains the result. 
+							xp->res = ioev->res;
+							xp->res2 = ioev->res2;
+							taskready(xp->waiter);
+						}
+						break;
+				}/*switch*/
+		}/*forever loop*/
+	}	
+
+	register eventfd for read [this is part of taskio_init]
+		Allocate tlcp = new TaskLibaioContext and insert into ContextContainer with key = eventfd.
+		epoll_ctl to EPOLL_CTL_ADD fd for EPOLLIN and set epoll_event.data.ptr to tlcp
+
+	task_sockfd_register(int fd)
+	{
+		
+		tscp = lookup ContextContainer(fd)
+		if found: 
+			return EEXIST error
+		else: 
+			tscp = create new TaskSockContext and initialize tlcp
+			bits = EPOLLIN | EPOLLOUT
+			insert into ContextContainer with key = fd
+			epoll_ctl(EPOLL_CTL_ADD, eventfd, ..) and set epoll_event.data.ptr to tscp.
+	}
+	
+	int task_netrw(fd, buf, nbytes, int rw)
+	{
+		n = nbytes;
+		tscp = lookup_ContextContainer(fd) else fail with FD NOT REGISTERED
+		verify tscp->tasktype, tscp->fd == fd
+		do {
+			if (rw == READ) {  // similar treatment for write
+				res = read(fd, buf, n);
+				if (res > 0) {
+					buf += res;
+					n -= res;
+				}
+				if (res < 0) {
+					if (errno == EAGAIN || errno == EWOULDBLOCK)) {
+						tscp->reader = taskrunning; 
+						taskswitch();
+					}
+					return errno;
+				} else {
+					return NOT CONNECTED ERROR
+				}
+			}
+		}while(n > 0);
+		return 0;
+	}
+	
+	int task_aiorw(fd, buf, nbytes, offset, int rw)
+	{
+		tlcp = lookup_ContextContainer(fd) else fail with FD NOT REGISTERED
+		verify tlcp->tasktype
+		struct iocb cb;
+		struct LibaioState ls;
+		io_prep_pwrite(&cb, ...) to set up io parameters // or io_prep_pread
+		io_set_eventfd(&cb, tlcp->fd)
+		cb.data.ptr = &ls;
+		ls.waiter = taskrunning;
+		io_submit(...);
+		taskswitch();
+		// we wake up after io completion. ls.res, ls.res2 has been filled up for us
+		return status based on ls contents; 
+	}
+	
+	
+	Note: This is modelled after fdtask of libtask/fd.c. However, fdtask provides two
+	services, one is epoll for fd events, the other is support for taskdelay().
+	aiotask will not support time delays, for which, fdtask will be needed.
+	
+	Global thread-local data used by aiotask:
+		io_context_t task_io_context; // used for libaio
+		int task_epollfd; // used by aiotask
+		ContextContainer; // an associative array that stores {key = int fd, value = TaskContext *p} pairs
+		
+	
+References
+	http://code.google.com/p/libtask/
