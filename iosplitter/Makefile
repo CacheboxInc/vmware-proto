@@ -1,22 +1,45 @@
-CFLAGS += -Wall -Werror -ggdb
-LDFLAGS += -ggdb
+# cva makefile
 
-EXE_SRCS = tst_threadpool.c tst-network.c tst-rpc-client.c tst-rpc-server.c
-EXE_OBJS = $(patsubst %.c,%.o,$(EXE_SRCS))
-EXES = $(patsubst %.c,%,$(EXE_SRCS))
+# note: define CDEV_LIBTASK to get cdevcor.h to expand macros to libtask names
 
-SRCS = bufpool.c hash.c queue.c threadpool.c network.c rpc.c
-OBJS = $(patsubst %.c,%.o,$(SRCS))
+export CC = gcc
+export CFLAGS = -Wall -Werror -ggdb -D CDEV_LIBTASK -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
+export LDFLAGS
 
-LDLIBS = -lpthread
+ifeq ($(ARCH),32)
+	CFLAGS += -m32
+	LDFLAGS += -m32
+else
+	a = $(shell getconf LONG_BIT)
+	CFLAGS += -m$(a)
+	LDFLAGS += -m$(a)
+endif
 
-.PHONY: all
-all: $(OBJS) $(EXE_OBJS) $(EXES)
+SUBDIRS = libtask rpc iosplitter
+DEPEND_DIRS = $(SUBDIRS)
+DEPEND_DIRS += tests
 
-tst_threadpool: $(SRCS)
-tst-network: $(SRCS)
-tst-rpc-client: $(SRCS)
-tst-rpc-server: $(SRCS)
+.PHONY : subdirs $(SUBDIRS)
 
-clean:
-	rm -rf $(OBJS) $(EXES) $(EXE_OBJS)
+subdirs : $(SUBDIRS)
+
+$(SUBDIRS):
+	$(MAKE) -C $@
+
+clean :
+	for dir in $(DEPEND_DIRS); do $(MAKE) -C $$dir clean; done
+	rm common/*.o
+
+depend : 
+	for dir in $(DEPEND_DIRS); do $(MAKE) -C $$dir depend; done
+
+.PHONY: tests
+tests: subdirs
+	make -C tests
+
+check: $(SUBDIRS)
+	make -C tests
+	python ./scripts/run-tests.py
+
+# WARNING --- Do not edit below this line, it is rebuilt by make depend.
+#BEGIN_DEPEND
