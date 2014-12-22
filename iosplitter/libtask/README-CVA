@@ -1,0 +1,8 @@
+CHANGES to LIBTASK
+
+1. add taskio.c taskio.h
+2. remove fd.c
+
+install taskio.h to /usr/local/include/
+
+

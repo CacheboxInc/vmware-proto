@@ -14,15 +14,9 @@
  * Returns number of buffers allocated.
  */
 
-int bufpool_init_reserve(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs,
-		int reserve, size_t nmax)
+int bufpool_init(bufpool_t *bp, size_t bufsize, size_t nbufs, size_t nmax)
 {
-	char  *n;
-	int   rc;
-	dll_t *buf;
-
-	n = strdup(name);
-	assert(n != NULL);
+	dll_t	*buf;
 
 	assert(bp);
 	assert(nbufs > 0 && nmax >= nbufs);
@@ -32,18 +26,11 @@ int bufpool_init_reserve(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs
 	BZERO(bp);
 	queue_init(&bp->freelist);
 	bp->bufsize = bufsize;
-	bp->nbufs   = nbufs;
-	bp->nmax    = nmax;
-	bp->state   = INITIALIZED;
-	bp->reserve = reserve;
-	bp->name    = n;
-
-	rc = pthread_mutex_init(&bp->lock, NULL);
-	assert(rc == 0);
-
-	rc = pthread_cond_init(&bp->rendez, NULL);
-	assert(rc == 0);
-
+	bp->nbufs = nbufs;
+	bp->nmax = nmax;
+	bp->state = INITIALIZED;
+	TASKRENDEZ_INIT(&bp->deinit);
+	TASKRENDEZ_INIT(&bp->rendez);
 	for (bp->owned = 0; bp->owned < nbufs; bp->owned++) {
 		if ((buf = (dll_t *)malloc(bufsize)) == NULL) {
 			return bp->owned;
@@ -54,55 +41,31 @@ int bufpool_init_reserve(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs
 	return bp->owned;
 }
 
-int bufpool_init(bufpool_t *bp, char *name, size_t bufsize, size_t nbufs, size_t nmax)
-{
-	return bufpool_init_reserve(bp, name, bufsize, nbufs, 0, nmax);
-}
 /*
  * free all buffers on the freelist.
  */
 void bufpool_deinit(bufpool_t *bp)
 {
-	int             rc;
-	struct timespec ts;
-	dll_t           *dllp;
+	dll_t	*dllp;
 
 	assert(bp != NULL);
-
-	rc = pthread_mutex_lock(&bp->lock);
-	assert(rc == 0);
-
-	if (bp->state != INITIALIZED) {
-		rc = pthread_mutex_unlock(&bp->lock);
-		return;
-	}
-
 	assert(bp->state == INITIALIZED);
+
 	bp->state = DEINITING;
 
-	while (bp->issued != 0) {
+	if (bp->issued != 0) {
 		/* block deinit until last buffer is freed */
-		ts.tv_sec  = 1;
-		ts.tv_nsec = 0;
-
-		rc = pthread_cond_timedwait(&bp->rendez, &bp->lock, &ts);
+		TASKSLEEP(&bp->deinit);
 	}
 	assert(bp->issued == 0);
 
-	while (queue_rem(&bp->freelist, &dllp) == 0) {
+	while(queue_rem(&bp->freelist, &dllp) == 0) {
 		free(dllp);
 		bp->owned--;
 	}
 	queue_deinit(&bp->freelist);
 
 	bp->state = DEINTED;
-
-	pthread_mutex_unlock(&bp->lock);
-
-	pthread_mutex_destroy(&bp->lock);
-	pthread_cond_destroy(&bp->rendez);
-
-	free(bp->name);
 }
 
 /*
@@ -111,63 +74,38 @@ void bufpool_deinit(bufpool_t *bp)
  * Otherwise sleep for one
  * returns 0 on success, -1 if buffer not found and noblock true
  */
-int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
+int bufpool_get(bufpool_t *bp, char **bufp, int noblock)
 {
-	int   rc;
-	dll_t *dllp;
-	int   res;
-
-	rc = pthread_mutex_lock(&bp->lock);
-	assert(rc == 0);
+	dll_t	*dllp;
 
 	assert(bp && (bp->state == INITIALIZED) && bufp);
-	assert(!(alloc_reserve != 0 && bp->reserve == 0));
-
 	while(1) {
 		if (queue_rem(&bp->freelist, &dllp) == 0) {
 			*bufp = (char *)dllp;
 			bp->issued++;
-			res = 0;
-			break;
+			return 0;
 		}
-
-		if ((bp->owned + bp->reserve < bp->nmax) ||
-				(alloc_reserve && (bp->reserve != 0) &&
-				 (bp->owned < bp->nmax))) {
+		if (bp->owned < bp->nmax) {
 			if ((dllp = (dll_t *)calloc(1, bp->bufsize)) == NULL) {
 				if (noblock) {
-					res = -1;
-					break;
+					return -1;
 				}
 			} else {
 				*bufp = (char *)dllp;
 				bp->owned++;
 				bp->issued++;
-				res = 0;
-				break;
+#ifdef  BUFPOOL_STATS_ENABLED
+				bp->nmallocs++;
+#endif
+				return 0;
 			}
 		} else {
 			if (noblock) {
-				res = -1;
-				break;
+				return -1;
 			}
 		}
-		pthread_cond_wait(&bp->rendez, &bp->lock);
+		TASKSLEEP(&bp->rendez);
 	}
-
-	rc = pthread_mutex_unlock(&bp->lock);
-	assert(rc == 0);
-	return res;
-}
-
-int bufpool_get(bufpool_t *bp, char **bufp, int noblock)
-{
-	return _bufpool_get(bp, bufp, noblock, 0);
-}
-
-int bufpool_get_reserve(bufpool_t *bp, char **bufp, int noblock)
-{
-	return _bufpool_get(bp, bufp, noblock, 1);
 }
 
 /*
@@ -186,30 +124,13 @@ int bufpool_get_zero(bufpool_t *bp, char **bufp, int noblock)
 	return 0;
 }
 
-int bufpool_get_reserve_zero(bufpool_t *bp, char **bufp, int noblock)
-{
-	int rc;
-
-	rc = bufpool_get_reserve(bp, bufp, noblock);
-	if (rc < 0) {
-		return rc;
-	}
-
-	memset(*bufp, 0, bp->bufsize);
-	return 0;
-}
 /*
  * Return buffer to pool if number of owned buffers <= nbufs
  * Otherwise just free the buffer and decrement owned.
  */
 void bufpool_put(bufpool_t *bp, char *buf)
 {
-	int rc;
-
 	assert(bp && buf);
-
-	rc = pthread_mutex_lock(&bp->lock);
-	assert(rc == 0);
 
 	bp->issued--;
 	assert(bp->issued >= 0);
@@ -227,10 +148,13 @@ void bufpool_put(bufpool_t *bp, char *buf)
 		assert(bp->owned >= bp->nbufs);
 	}
 
-	pthread_cond_broadcast(&bp->rendez);
-
-	pthread_mutex_unlock(&bp->lock);
+	TASKWAKEUP(&bp->rendez);
+	if (bp->issued == 0 && bp->state == DEINITING) {
+		TASKWAKEUP(&bp->deinit);
+	}
 }
+
+/* ###############  UNIT TEST CODE ##################### */
 
 #ifdef SOLOTEST_BUFPOOL
 

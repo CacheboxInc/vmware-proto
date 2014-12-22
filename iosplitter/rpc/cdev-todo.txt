@@ -1,0 +1,18 @@
+LIBTASK BASED RPC and TASKIO.C
+TODO LIST
+['ok' mean done, 'N' means not to be implemented]
+
+*	Buffer pool for libtask task stacks (32K)
+		Not trivial, will need change in libtask
+ok	Server can specify zero hash table size and server issued 
+		rpc_request will fail immediately
+*	Well-known pipe endpoint: taskpipe_announce, taskpipe_accept, taskpipe_connect
+ok	Abstract out libtask dependencies using macros
+*	Add a checksum to rpc_msg_hdr_t. sender should init it and recvr should verify it.
+*	if rpc_msg_put may be called on a deinited rpc_chan_t, need to handle this case.
+*	Wrap debug code in #ifdef
+
+N	Server side should start a new pthread to service a new incoming connection
+	per Mitra: Library should work with thread or non-thread, users will create
+	pthreads if they want.
+	Actually thread-local variables are used in taskio.c. rpc.c has no global vars.

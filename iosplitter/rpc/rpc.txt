@@ -1,0 +1,250 @@
+IMPLEMENTATION NOTES ON LIBTASK-BASED RPC 
+
+OVERVIEW
+	struct rpc_chan_t *rc is the handle to an RPC endpoint, either client or server side.
+	
+	client can have any number of tasks; any task can send a request and wait for response on an rc.
+	
+	RPC can use either socket or pipe fd for the client-server interconnect. 
+	Client first creates the fd, then calls rpc_create_chan() to get rpc_chan_t *rc.
+	
+	Server has an listen-accept looping task to get an incoming socket connection.
+	Server can also start a task to wait for an incoming named pipe connection that then 
+	creates a private connection with client.
+	In either case, once an incoming fd is created, a task is started to get requests on
+	this fd. 
+	
+	As requests come in, a new task for each request is started to handle it.
+	
+	libtask is modified to allow creation of tasks from a pre-created pool of stack memory
+	so that we do not get insufficient memory error at inconvenient points.
+	
+	NOTE:
+
+	1. The RPC channel is symmetric in the sense that either end point can send
+	requests to the other side and expect a handler to service the request and
+	return a response.
+	If a client does not expect to receive a request, it can pass NULL handler to 
+	rpc_chan_init. In that case, a default handler is used.
+	
+	[RFE] If a server does not expect to send a request, it can specify zero hash table size.
+	Any stray request will be failed with RPC_ENOSYS error code.
+	
+	2. CVA protocols have request types that server will send to 
+	the client (related to flushing dirty data). On the other hand, a remote vSSD
+	does not ever send requests to the CVA.
+	
+RPC PROTOCOL
+	An RPC message consists of a client defined header followed by an optional payload.
+	Client defined header embeds struct rpc_msg_hdr as its first member.
+	
+	On the client side,
+		request msgp with new seqid is constructed and inserted in hash table.
+		Payload buffer can be obtained from rpc data buffer pool using rpc_databuf_get
+		or users can supply their own buffer.
+		Client defined header is sent over the connection, followed by the payload.
+		if response has not come back, sleep on msgp->Rendez (libtask condition variable)
+		Take care of the response, then dispose off or reuse the msgp.
+	
+	On the server side, 
+		rpc_msg_hdr is read to determine size of client-defined header
+		remaining bytes of client-defined header are read in
+		optional payload is read in.
+		rpc_msg_t *msgp is constructed that contains both client header and payload.
+		user-defined handler task is created and rpc_msg_t *msgp is passed to it.
+			handler task services the request, may block.
+			handler turns the msgp around and sends it as a response. (seqid not changed)
+			Then handler terminates. 
+			
+	On the client side,
+		request msgp is stored in a hash table key = seqid.
+		reader task reads off the response, constructs a msgp, looks up matching req msgp
+		links response msgp to req msgp, and wakes up request sender task sleeping
+		on a Rendez inside req msgp.
+		
+BUFFER POOLS
+	When an rpc_chan_t is created on server, user specifies level of concurrency = maxreqs.
+	This number of buffers is malloc'd and stored in a bufpool_t within rpc_chan_t.
+	The size of each buffer is given by the user for the largest header size it is ready to 
+	handle.
+	maxreqs also acts as a throttle, because incoming requests will block until a msgp becomes
+	available from the pool. 
+	
+	Since each request needs its own task, we also preallocate maxreqs worth of task stacks
+	and store them in another pool.
+	
+	Incoming and outgoing Payloads require buffers too. 
+	Although we support variable length payloads e.g. 4, 8, 12, 16, ... 64 KB,
+	vSSD design actually breaks them up into individual chunks (1 vssd_blksz).
+	So user specifies payload buffer size as well, we create a small pool of buffers.
+	When a task requires a buffer, it gets a free buffer from the pool, or mallocs a new buffer,
+	or sleeps for a buffer to be returned to the pool. 
+	This allows a trade off between not blocking for temporary memory consumption but
+	setting an upper limit on memory consumption. Second, if malloc fails, the task does not
+	fail the request.
+	
+	VARIABLE POOL SIZE. 
+		A task will wait if the pool is empty. 
+		We use an opportunistic design, as follows:
+		Have two parameters: nbufs and nbufsmax.
+		bufpool_init will allocate nbufs. 
+		if pool is empty but current_bufs < nbufsmax, 
+			bufpool_get will try to malloc a new buffer.
+		if current_bufs > nbufs, 
+			bufpool_put will free the buffer and decrement current_bufs.
+		
+		nbufs should be large enough that there is no chance of deadlock.
+		Normally one request will consume at most two data buffers.
+		The worst case scenario is:
+			N requests are allowed in
+				Each grabs one data buffer
+			Now nbufsmax is hit
+			everybody sleeps for second data buffer.
+			So nbufsmax > N to avoid deadlock.
+			Suggested values for data buffers
+				nbufsmax: 2N+1
+				nbufs: N+1
+
+RPC API: IMPORTANT FUNCTIONS
+	First of all, remember that RPC connection is completely symmetric.
+	Either endpoint can send rpc to the other.
+	
+	void rpc_databuf_get(rpc_chan_t *rcp, char **bufp); // get a rpc_msg_t * from rcp pool
+	void rpc_msg_get(rpc_chan_t *rcp, int msgtype, size_t msglen, size_t payloadlen,
+					char *payload, rpc_msg_t **msgpp); // get a rpcbuf_t * from rcp pool
+	void rpc_msg_put(rpc_chan_t *rcp, rpc_msg_t *msgp); // DEEP PUT
+		releases both payload and msgp, and also does the same for msgp->resp
+	void rpc_databuf_put(rpc_chan_t *rcp, char *buf); 
+		This is not typically needed because rpc_msg_put will free attached payloads.
+	NOTE: When users use their own payload buffers, they must zero out rpc_msg_t.payload
+	and rpc_msg_t.hdr.payloadlen before calling rpc_msg_put.
+	
+	Client Side:
+		Set up a socket or pipe fd to the rpc server. call task_sockfd_register(fd);
+		Allocate or otherwise set up a memory area for a rpc_chan_t.
+		Now initialize the channel
+		int rpc_chan_init(rpc_chan_t *rcp, int fd, size_t nway, size_t msgsz, size_t datasz, 
+						rpchandler_t handler);
+			This starts a system task to:
+				read on the fd, 
+				input a complete response, 
+				match it with its request,
+				set reqmsgp->resp = resmsgp, 
+				wake up the sender.
+			Note: handler can be NULL if no requests are expected.
+		rpc_databuf_get(rcp, *buf); // get a buffer
+		void rpc_msg_get(rcp, &msgp, ...); //get a properly filled up msgp
+		int rpc_request(rpc_chan_t *rcp, rpc_msg_t *msgp);
+			One or more tasks can concurrently send rpc requests over rcp.
+			The function is pseudo blocking -- it will return when a
+			response is received (or on errors such as connection closed).
+			The response message is available in msgp->resp.
+			
+		When it is time to close the connection,
+		
+		If the channel needs to be reopened, user can generate a fresh fd and
+		call rpc_chan_init again. Otherwise, user calls:
+		
+		int rpc_chan_deinit(rpc_chan_t *rcp);
+			This frees up memory allocated by rpc_chan_init.
+			After this, user can discard memory used for rcp.
+		void rpc_chan_deinit(rpc_chan_t *rcp); free chan memory
+		
+	Server Side:
+		server has mechanisms to accept incoming connection on either a well known
+		IP port or a well-known named pipe. A private connection fd is created.
+		For sockets, use:
+			int tasknet_announce(char *server, int port, int *fdp);
+			int tasknet_accept(int fd, char *server, int *port, int *cfdp);
+			int tasknet_connect(char *server, int port, int *fdp);
+		[RFE] Write analogous functions for pipe based incoming connections.
+		
+		Next a channel is initialized with this well-known socket/pipe fd
+		int rpc_chan_init();
+			This starts a system task similar to what happens on the client,
+			but it gets a request, creates a handler task to service it.
+			The handler task will service one request then end.
+			
+		int rpc_response(rpc_chan_t *rcp, rpc_msg_t *resp);
+			handler task sends back its response.
+			
+SHUTTING DOWN THE ENDPOINT
+	Once an rpc_chan_t *rcp has been set up, it gets passed to other tasks, and it
+	is not safe to call rpc_chan_deinit until all such tasks have drained out
+	and no new tasks will be given the rcp. We will go with proposal 2 below.
+	Proposal 1:
+		rpc_chan_t contains a reference count, rcp->refcnt, a flag rcp->enabled
+		and a Rendez rcp->rendez
+		before an rpc is handed to a task, refcnt is incremented using rpc_chan_hold().
+		When the task no longer needs rcp, it calls  
+		rpc_chan_drop(rcp): this decrements refcnt and if it becomes 1, signals rendez.
+		rpc_chan_close waits until refcnt goes to 1, sleeping on rendez.
+	Proposal 2:
+		use a thread-local but permanent rpc_chan_t object. Then it is safe
+		to pass rcp around. An rcp->enabled flag indicates the state of the channel. 
+		Any task that attempts to use a disabled channel will either fail immediately,
+		or if it was waiting on the fd, will get an error. Coroutines model does
+		not allow other races between a rpc_chan_deinit and another task still using
+		the channel.
+		
+	If the other side closes the connection, some read or write on that fd will fail.
+	rpc_request and rpc_response handle this condition as follows:
+		1. reset rcp->enabled
+		2. close rcp->fd
+		3. rpc_request returns failure.
+
+	On the server, when an incoming connection is lost, 
+	the user of rpc library must be informed of this.
+	This is done by passing a dummy msgp with a null request but valid msgp->rcp.
+	
+CRAFTING OVER-THE-WIRE USER MESSAGES
+	We save one system call during req or response send by crafting data structures
+	in the following way.
+	struct rpc_msg_hdr can be effectively expanded to hold additional data
+	for a given user-defined message type. 
+	We explain by example, let's say user writes following code:
+	
+	struct writemsg {
+		rpc_msghdr_t	hdr;  /* MUST BE FIRST MEMBER */
+		uint64_t		addr;
+		uint32_t		len;
+		uint32_t		handle;
+	};
+	struct statmsg {
+		rpc_msghdr_t	hdr;  /* MUST BE FIRST MEMBER */
+		uint32_t		handle;
+		struct mystat	mystat;
+	};
+	union maxmsg {
+		struct writemsg;
+		struct statmsg;
+	};
+	#define MSGSIZE (sizeof union maxmsg)
+	Now, during rpc_chan_init, user passes msgbufsize = MSGSIZE.
+	(which is further increased to match an expanded rpc_msg_t)
+	RPC_MSGBUF_GET will return a rpc_msg_t * whose msgp->hdr can be 
+	safely cast to any one of struct writemsg, statmsg, ... etc.
+
+	
+FD FACTORY FOR SETTING UP SOCKET or PIPE ENDPOINT
+	rpc.c needs to be given an appropriate fd to initialize an rpc channel.
+	
+	although for socket endpoints, libtask has helper functions they cannot
+	be used because we built our own taskio.c to replace libtask fd.c.
+	We will add our own functions in taskio.c for named pipes and sockets.
+		taskpipe_listen, taskpipe_accept for server side
+		taskpipe_connect for client side.
+		tasksock_listen, tasksock_accept
+		tasksock_connect
+	
+UNIT TEST PLAN
+	1. Write a rpc client that will send N concurrent ping requests to an rpc server.
+	Verify that all come back successfully
+	2. Send 1000 N-way concurrent requests with 4KB payload. Get back response, measure MBps.
+	3. Same as #2, but the payload is in the response. 
+	
+	
+IMPLEMENTATION NOTES
+	1. hash_t, queue_t and bufpool_t are moved into a separate file, container.c / container.h
+	2. Current design uses a pool of fixed size data buffers using bufpool_t.
+		THIS CAN ONLY HANDLE fixed size payloads.
