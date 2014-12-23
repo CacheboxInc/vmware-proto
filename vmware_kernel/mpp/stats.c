@@ -234,7 +234,7 @@ static void _cb_stats_update(vmk_TimerCookie data)
 	assert(stats);
 
 	if (DLL_ISEMPTY(&stats->stats_list) || !stats->initialized) {
-		return;
+		goto out;
 	}
 
 	assert(stats->initialized == VMK_TRUE);
@@ -242,7 +242,7 @@ static void _cb_stats_update(vmk_TimerCookie data)
 
 	p       = VMK_FALSE;
 	samples = ++stats->sample;
-	if ((samples % 100) == 0) {
+	if ((samples % 1000) == 0) {
 		p             = VMK_TRUE;
 		stats->sample = 0;
 	}
@@ -268,8 +268,9 @@ static void _cb_stats_update(vmk_TimerCookie data)
 		vmk_WarningMessage("$$$$$$$ STATS PRINTS END $$$$$$$$\n");
 	}
 
+out:
 	s = vmk_TimerSchedule(stats->timer_q, _cb_stats_update, stats,
-		VMK_USEC_PER_MSEC * 100, VMK_TIMER_DEFAULT_TOLERANCE,
+		VMK_USEC_PER_MSEC * 10, VMK_TIMER_DEFAULT_TOLERANCE,
 		VMK_TIMER_ATTR_NONE, VMK_LOCKDOMAIN_INVALID,
 		VMK_SPINLOCK_UNRANKED, &stats->timer);
 	assert(s == VMK_OK);
@@ -308,7 +309,7 @@ int cb_stat_sys_init(cb_stat_sys_t *stats, int nstats, const char *name,
 	}
 
 	s = vmk_TimerSchedule(stats->timer_q, _cb_stats_update, stats,
-		VMK_USEC_PER_MSEC * 100, VMK_TIMER_DEFAULT_TOLERANCE,
+		VMK_USEC_PER_MSEC * 10, VMK_TIMER_DEFAULT_TOLERANCE,
 		VMK_TIMER_ATTR_NONE, VMK_LOCKDOMAIN_INVALID,
 		VMK_SPINLOCK_UNRANKED, &stats->timer);
 

@@ -161,8 +161,10 @@ rpc_chan_t           rpc;
 static vmk_Socket    sock = NULL;
 static cb_stat_sys_t stat_sys;
 static cb_stat_t     rpc_req_fun_stat;
+static cb_stat_t     rpc_req_q;
 static cb_stat_t     sg_cp_fun_stat;
 static cb_stat_t     send_tp_work_q_stat;
+static cb_stat_t     scsi_cmd_q;
 cb_stat_t     recv_tp_work_q_stat;
 thread_pool_t        send_tp;
 
@@ -777,6 +779,7 @@ static void ExampleCompleteDeviceCommand(ExampleCommand *exCmd)
 	ExampleFreeExCommand(exCmd);
 
 	cmd->done(cmd);
+	cb_stat_exit(&scsi_cmd_q, 0);
 
 	ExampleDeviceStartCommand(exDev->device);
 }
@@ -1275,6 +1278,7 @@ static void cb_mpp_resp_handler(rpc_msg_t *msgp)
 
 	rcp = msgp->rcp;
 
+	cb_stat_exit(&rpc_req_q, 0);
 	switch (RPC_GETMSGTYPE(msgp)) {
 		case RPC_READ_MSG:
 			resp_read_cmd(rcp, msgp);
@@ -1318,6 +1322,7 @@ static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	r->len    = len;
 
 	cb_stat_enter(&rpc_req_fun_stat, &h);
+	cb_stat_enter(&rpc_req_q, NULL);
 	rc        = rpc_async_request(rcp, m);
 	cb_stat_exit(&rpc_req_fun_stat, h);
 	if (rc < 0) {
@@ -1379,6 +1384,7 @@ static VMK_ReturnStatus write_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	w->offset = offset;
 	w->len    = len;
 	cb_stat_enter(&rpc_req_fun_stat, &h);
+	cb_stat_enter(&rpc_req_q, NULL);
 	rc        = rpc_async_request(rcp, m);
 	cb_stat_exit(&rpc_req_fun_stat, h);
 	if (rc < 0) {
@@ -1801,6 +1807,8 @@ ExampleDeviceStartCommand(vmk_ScsiDevice *scsiDev)
 			break;
 		}
 
+		cb_stat_enter(&send_tp_work_q_stat, NULL);
+		cb_stat_enter(&scsi_cmd_q, NULL);
 		/*
 		 * Once the removing flag is set, no IO should be issued from
 		 * higher layers, because we ensure openCount == 0 before
@@ -1835,7 +1843,6 @@ ExampleDeviceStartCommand(vmk_ScsiDevice *scsiDev)
 		w->data    = exCmd;
 		w->work_fn = issue_cmd;
 
-		cb_stat_enter(&send_tp_work_q_stat, NULL);
 		schedule_work(&send_tp, w);
 	} while (1);
 
@@ -1853,8 +1860,10 @@ static inline void deinit_cachebox(void)
 	thread_pool_deinit(&send_tp);
 
 	cb_stat_deinit(&rpc_req_fun_stat);
+	cb_stat_deinit(&rpc_req_q);
 	cb_stat_deinit(&sg_cp_fun_stat);
 	cb_stat_deinit(&send_tp_work_q_stat);
+	cb_stat_deinit(&scsi_cmd_q);
 	cb_stat_deinit(&recv_tp_work_q_stat);
 
 	cb_stat_sys_deinit(&stat_sys);
@@ -1904,8 +1913,10 @@ static inline VMK_ReturnStatus init_cachebox(void)
 
 	cb_stat_init(&stat_sys, &rpc_req_fun_stat, FUN_PROFILE, "req_fu");
 	cb_stat_init(&stat_sys, &sg_cp_fun_stat, FUN_PROFILE, "sg_copy");
+	cb_stat_init(&stat_sys, &rpc_req_q, QUEUE, "req_q");
 	cb_stat_init(&stat_sys, &send_tp_work_q_stat, QUEUE, "send-w-q");
 	cb_stat_init(&stat_sys, &recv_tp_work_q_stat, QUEUE, "recv-w-q");
+	cb_stat_init(&stat_sys, &scsi_cmd_q, QUEUE, "scsi-q");
 
 	return VMK_OK;
 
@@ -2790,7 +2801,6 @@ ExamplePathClaimEnd(vmk_ScsiPlugin *_plugin)
 {
 	VMK_ReturnStatus status = VMK_OK;
 	vmk_uint32 i;
-	int rc;
 	module_global_t module;
 
 	_module_struct_init(&module);
