@@ -13,6 +13,7 @@ typedef struct cb_stat_sys {
 	dll_t           stats_list;
 	module_global_t *module;
 	int             nstats;
+	int             sample;
 	vmk_Bool        initialized;
 } cb_stat_sys_t;
 
@@ -24,8 +25,8 @@ typedef enum {
 } cb_stat_type_t;
 
 typedef struct cb_stats_queue {
+	vmk_atomic64 total;
 	vmk_atomic64 running;
-	vmk_uint64   avg;
 } cb_stat_queue_t;
 
 typedef struct funp_cntxt {

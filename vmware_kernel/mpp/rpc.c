@@ -285,7 +285,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	rcp->enabled      = 1;
 	rcp->seqid        = 1;
 
-	rc = thread_pool_init(&rcp->tp, n, module, 16, 128);
+	rc = thread_pool_init(&rcp->tp, n, module, 4, 128);
 	if (rc < 0) {
 		goto error;
 	}
