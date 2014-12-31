@@ -20,6 +20,7 @@
 #define NO_THREADS 32
 
 /* TODO:
+   	0. Change tst-rpc.h so that mpp<-->iosplitter comn would work.
 	1. Think about data structure requiremnt in multiple open messages from
 	   MPP. Handle initial session establishment in MPP->IOsplitter->CVA
 	2. Design RPC messages structures which gets communicated in
@@ -41,7 +42,6 @@ static int			tcount = 0;
 Rendez main_end;
 
 int dev_handle = -1;
-rpc_chan_t *rcp;
 
 uint64_t        req_recv;
 pthread_mutex_t lock;
@@ -161,8 +161,6 @@ void rpc_msg_handler(void *arg)
 	case RPC_OPEN_MSG:
 		assert(msgp->payload == NULL && msgp->hdr.payloadlen == 0);
 		printf("Open Recieved\n");
-		printf("Waking up main accept-connect loop");
-		printf("Sending Response\n");
 		break;
 	case RPC_READ_MSG:
 		assert(msgp->payload == NULL && msgp->hdr.payloadlen == 0);
@@ -210,7 +208,6 @@ void task_new_session(void *arg)
 {
 	struct thread_data	*t = arg;
 	int			rc;
-	rpc_chan_t		*rcp;
 	session_t		client_session;
 
 	taskname("%s", __func__);
@@ -230,13 +227,13 @@ void task_new_session(void *arg)
 	rc = tasknet_setnoblock(t->fd);
 	assert(rc == 0);
 
-	t->rcp = rcp = rpc_chan_new();
-	assert(rcp != NULL);
+	t->rcp = rpc_chan_new();
+	assert(t->rcp != NULL);
 
 	rc = task_sockfd_register(t->fd);
 	assert(rc == 0);
 
-	rc = rpc_chan_init(rcp, t->fd, t->fd, NTASK, MAXMSGSZ, PAYLOADSZ,
+	rc = rpc_chan_init(t->rcp, t->fd, t->fd, NTASK, MAXMSGSZ, PAYLOADSZ,
 			NTASK * 2, rpc_msg_handler, NULL);
 	assert(rc == 0);
 
