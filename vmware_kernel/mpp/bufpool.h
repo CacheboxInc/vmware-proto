@@ -33,10 +33,8 @@ typedef struct bufpool {
 	size_t        nmax;
 	int           reserve;
 
-#ifdef  BUFPOOL_STATS_ENABLED
 	int           nmallocs;
 	int           nfrees;
-#endif
 
 	BUFPOOL_STATE state;
 } bufpool_t;

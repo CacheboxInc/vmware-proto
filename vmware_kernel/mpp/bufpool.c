@@ -2,6 +2,33 @@
 #include "vmware_include.h"
 #include "bufpool.h"
 
+void bufpool_dump(bufpool_t *bp, char *msg)
+{
+	VMK_ReturnStatus s;
+	vmk_HeapGetProps props;
+
+	vmk_WarningMessage("-----bufpool dump:  %s -----\n", msg ? msg : "");
+	vmk_WarningMessage("\tbp         %p\n", bp);
+	vmk_WarningMessage("\tissued     %ld\n", bp->issued);
+	vmk_WarningMessage("\towned      %ld\n", bp->owned);
+	vmk_WarningMessage("\tbufsize    %ld\n", bp->bufsize);
+	vmk_WarningMessage("\tnbufs      %ld\n", bp->nbufs);
+	vmk_WarningMessage("\tnmax       %ld\n", bp->nmax);
+	vmk_WarningMessage("\tstate      %d\n", bp->state);
+	vmk_WarningMessage("\tnmallocs   %d\n", bp->nmallocs);
+	vmk_WarningMessage("\tnfrees     %d\n", bp->nfrees);
+	vmk_WarningMessage("\treserve    %d\n", bp->reserve);
+//	dump_queue(&bp->freelist);
+
+	s = vmk_HeapGetProperties(bp->heap_id, &props);
+	assert(s == VMK_OK);
+
+	vmk_WarningMessage("\tHeap Name %s\n", vmk_NameToString(&props.name));
+
+	vmk_WarningMessage();
+	vmk_WarningMessage("\n----------------\n");
+}
+
 /*
  * initialize a buffer pool of up to nbufs count of
  * fixed size buffers of size = bufsize.
@@ -113,9 +140,10 @@ void bufpool_deinit(bufpool_t *bp)
  */
 int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 {
-	int   rc;
-	dll_t *dllp;
-	int   res;
+	int      rc;
+	dll_t    *dllp;
+	int      res;
+	vmk_Bool b;
 
 	rc = pthread_mutex_lock(bp->lock);
 	assert(rc == 0);
@@ -136,7 +164,7 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 		if ((bp->owned + bp->reserve < bp->nmax) ||
 				(alloc_reserve && (bp->reserve != 0) &&
 				 (bp->owned < bp->nmax))) {
-			if ((dllp = (dll_t *) calloc(bp->heap_id, 1, bp->bufsize)) == NULL) {
+			if ((dllp = (dll_t *) malloc(bp->heap_id, bp->bufsize)) == NULL) {
 				if (noblock) {
 					res = -1;
 					break;
@@ -145,6 +173,7 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 				*bufp = (char *)dllp;
 				bp->owned++;
 				bp->issued++;
+				bp->nmallocs++;
 				res = 0;
 				break;
 			}
@@ -155,12 +184,19 @@ int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
 			}
 		}
 
-		while ((bp->issued + bp->reserve) >= bp->nmax) {
+		b = VMK_FALSE;
+		while (!b) {
 			vmk_WorldWait((vmk_WorldEventID) &bp->issued, bp->lock,
-					10, "bufpool_get: blocked.\n");
+					100, "bufpool_get: blocked.\n");
 
 			rc = pthread_mutex_lock(bp->lock);
 			assert(rc == 0);
+
+			if (alloc_reserve && (bp->owned < bp->nmax)) {
+				b = VMK_TRUE;
+			} else if ((bp->owned + bp->reserve) < bp->nmax) {
+				b = VMK_TRUE;
+			}
 		}
 	}
 
@@ -230,9 +266,7 @@ void bufpool_put(bufpool_t *bp, char *buf)
 		buf=NULL;
 		bp->owned--;
 		assert(bp->owned >= 0);
-#ifdef  BUFPOOL_STATS_ENABLED
 		bp->nfrees++;
-#endif
 		assert(bp->owned >= bp->nbufs);
 	}
 
@@ -242,24 +276,6 @@ void bufpool_put(bufpool_t *bp, char *buf)
 }
 
 #ifdef SOLOTEST_BUFPOOL
-
-void bufpool_dump(bufpool_t *bp, char *msg)
-{
-	printf("-----bufpool dump:  %s -----\n", msg ? msg : "");
-	printf("\tissued     %ld\n", bp->issued);
-	printf("\towned      %ld\n", bp->owned);
-	printf("\tbufsize    %ld\n", bp->bufsize);
-	printf("\tnbufs      %ld\n", bp->nbufs);
-	printf("\tnmax       %ld\n", bp->nmax);
-	printf("\tstate      %d\n", bp->state);
-#ifdef  BUFPOOL_STATS_ENABLED
-	printf("\tnmallocs   %d\n", bp->nmallocs);
-	printf("\tnfrees     %d\n", bp->nfrees);
-#endif
-	dump_queue(&bp->freelist);
-	printf("\n----------------\n");
-}
-
 /*
  * Create a bufpool with one buffer. nbufs= 1, nmax=2
  * Task 1 (bufpool_main):
@@ -293,14 +309,14 @@ void bufpool_task(void *p)
 	res = bufpool_get(&pool, &buf, 0);
 	bufpool_dump(&pool, "task2: after a get");
 	assert(res == 0 && buf);
-	printf("bufpool_task: going in for second buffer NOBLOCK\n");
+	vmk_WarningMessage("bufpool_task: going in for second buffer NOBLOCK\n");
 	res = bufpool_get(&pool, &buf2, 1);
 	assert(res != 0 && buf2 == NULL);
-	printf("bufpool_task: going in for second buffer\n");
+	vmk_WarningMessage("bufpool_task: going in for second buffer\n");
 	t0 = time(0);
 	res = bufpool_get(&pool, &buf2, 0);
 	t1 = time(0);
-	printf("bufpool_task: second get took %ld seconds\n", t1 - t0);
+	vmk_WarningMessage("bufpool_task: second get took %ld seconds\n", t1 - t0);
 	assert(res == 0 && buf2 && pool.owned == 2);
 	bufpool_dump(&pool, "task2: after 2nd get");
 	bufpool_put(&pool, buf);
@@ -308,9 +324,9 @@ void bufpool_task(void *p)
 	bufpool_put(&pool, buf2);
 	bufpool_dump(&pool, "task2: after 2nd put");
 	assert(pool.owned == 1 && pool.freelist.q_len == 1);
-	printf("task2: signaling task1\n");
+	vmk_WarningMessage("task2: signaling task1\n");
 	taskwakeup(&rendez);
-	printf("task2: signalled task1\ntask 2 returns\n");
+	vmk_WarningMessage("task2: signalled task1\ntask 2 returns\n");
 }
 
 
@@ -335,15 +351,15 @@ void bufpool_main()
 	assert(res == 0 && buf && pool.owned == 1 && pool.freelist.q_len == 0);
 	bufpool_dump(&pool, "bufpool_main: after second get");
 	taskcreate(bufpool_task, 0, 32*1024);
-	printf("bufpool_main: sleeping for 10 seconds\n");
+	vmk_WarningMessage("bufpool_main: sleeping for 10 seconds\n");
 	taskdelay(10*1000);
-	printf("bufpool_main: continuing after 10 seconds\n");
+	vmk_WarningMessage("bufpool_main: continuing after 10 seconds\n");
 	bufpool_dump(&pool, "bufpool_main: before second put");
 	bufpool_put(&pool, buf);
 	bufpool_dump(&pool, "bufpool_main: after second put");
-	printf("bufpool_main: waiting on signal\n");
+	vmk_WarningMessage("bufpool_main: waiting on signal\n");
 	tasksleep(&rendez);
-	printf("bufpool_main: got signal\nbufpool_main returns\n");
+	vmk_WarningMessage("bufpool_main: got signal\nbufpool_main returns\n");
 }
 
 void taskmain(int argc, char *argv[])

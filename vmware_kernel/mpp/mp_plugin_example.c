@@ -1176,6 +1176,41 @@ ExampleIssueFail(vmk_ScsiPath *path,
  ***********************************************************************
  */
 
+static inline VMK_ReturnStatus cb_mpp_stat_sys_init(module_global_t *module)
+{
+	int rc;
+
+	rc = cb_stat_sys_init(&stat_sys, 16, EXAMPLE_NAME, module);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
+	cb_stat_init(&stat_sys, &rpc_req_fun_stat, FUN_PROFILE, "req_fu");
+	cb_stat_init(&stat_sys, &sg_cp_fun_stat, FUN_PROFILE, "sg_copy");
+	cb_stat_init(&stat_sys, &rpc_req_q, QUEUE, "req_q");
+	cb_stat_init(&stat_sys, &send_tp_work_q_stat, QUEUE, "send-w-q");
+	cb_stat_init(&stat_sys, &recv_tp_work_q_stat, QUEUE, "recv-w-q");
+	cb_stat_init(&stat_sys, &scsi_cmd_q, QUEUE, "scsi-q");
+
+	return VMK_OK;
+}
+
+static inline void cb_mpp_stat_sys_deinit(void)
+{
+	if (stat_sys.initialized != VMK_TRUE) {
+		return;
+	}
+	cb_stat_deinit(&rpc_req_fun_stat);
+	cb_stat_deinit(&rpc_req_q);
+	cb_stat_deinit(&sg_cp_fun_stat);
+	cb_stat_deinit(&send_tp_work_q_stat);
+	cb_stat_deinit(&scsi_cmd_q);
+	cb_stat_deinit(&recv_tp_work_q_stat);
+
+	cb_stat_sys_deinit(&stat_sys);
+
+}
+
 static void cb_mpp_req_handler(rpc_msg_t *msgp)
 {
 	vmk_WarningMessage("%s ==>.\n", __func__);
@@ -1859,14 +1894,7 @@ static inline void deinit_cachebox(void)
 	rpc_chan_deinit(rcp);
 	thread_pool_deinit(&send_tp);
 
-	cb_stat_deinit(&rpc_req_fun_stat);
-	cb_stat_deinit(&rpc_req_q);
-	cb_stat_deinit(&sg_cp_fun_stat);
-	cb_stat_deinit(&send_tp_work_q_stat);
-	cb_stat_deinit(&scsi_cmd_q);
-	cb_stat_deinit(&recv_tp_work_q_stat);
-
-	cb_stat_sys_deinit(&stat_sys);
+	cb_mpp_stat_sys_deinit();
 }
 
 static inline VMK_ReturnStatus init_cachebox(void)
@@ -1881,8 +1909,8 @@ static inline VMK_ReturnStatus init_cachebox(void)
 
 	_module_struct_init(&module);
 
-	rc = cb_stat_sys_init(&stat_sys, 16, EXAMPLE_NAME, &module);
-	if (rc < 0) {
+	rc = cb_mpp_stat_sys_init(&module);
+	if (rc != VMK_OK) {
 		return VMK_FAILURE;
 	}
 
@@ -1911,20 +1939,9 @@ static inline VMK_ReturnStatus init_cachebox(void)
 		goto error;
 	}
 
-	cb_stat_init(&stat_sys, &rpc_req_fun_stat, FUN_PROFILE, "req_fu");
-	cb_stat_init(&stat_sys, &sg_cp_fun_stat, FUN_PROFILE, "sg_copy");
-	cb_stat_init(&stat_sys, &rpc_req_q, QUEUE, "req_q");
-	cb_stat_init(&stat_sys, &send_tp_work_q_stat, QUEUE, "send-w-q");
-	cb_stat_init(&stat_sys, &recv_tp_work_q_stat, QUEUE, "recv-w-q");
-	cb_stat_init(&stat_sys, &scsi_cmd_q, QUEUE, "scsi-q");
-
 	return VMK_OK;
 
 error:
-	if (stat_sys.initialized == VMK_TRUE) {
-		cb_stat_sys_deinit(&stat_sys);
-	}
-
 	if (ps) {
 		thread_pool_deinit(&send_tp);
 	}
@@ -1932,6 +1949,8 @@ error:
 	if (sock != NULL) {
 		socket_close(sock);
 	}
+
+	cb_mpp_stat_sys_deinit();
 	return VMK_FAILURE;
 }
 
@@ -4705,12 +4724,14 @@ init_module(void)
 
    pluginRegistered = VMK_TRUE;
 
+#if 0
 		status = init_cachebox();
 		if (status != VMK_OK) {
 			vmk_WarningMessage("Initializing CacheBox Failed.\n");
 			goto error;
 		}
 		cachebox_initialized = VMK_TRUE;
+#endif
 
    /* Enable the plugin */
    status = ExampleStartPlugin();
@@ -4719,7 +4740,8 @@ init_module(void)
       goto error;
    }
 
-#if 0	  
+#if 1
+   assert(cachebox_initialized == VMK_FALSE);
       /* Test for threapool */
       if (VMK_OK != start_test_thread()) {
 	      vmk_WarningMessage("rpc_test failed");
@@ -4826,7 +4848,7 @@ cleanup_module(void)
 
    VMK_ASSERT(vmk_ListIsEmpty(&retryQueue));
 
-   deinit_cachebox();
+//   deinit_cachebox();
 
    for (i = 0; i < maxDevices; i++) {
       VMK_ASSERT(createdDevices[i] == NULL);
@@ -5035,15 +5057,12 @@ VMK_ReturnStatus threadpool_test(void)
 	return VMK_OK;
 }
 
-static int cond;
-
 void mpp_req_handler(rpc_msg_t *msgp)
 {
 	vmk_WarningMessage("%s ==>.\n", __func__);
 	if (RPC_IS_CONNCLOSED(msgp)) {
 		rpc_msg_put(msgp->rcp, msgp);
 		rpc_chan_close(msgp->rcp);
-		vmk_WorldWakeup((vmk_WorldEventID) &cond);
 		vmk_WarningMessage("%s <==.\n", __func__);
 		return;
 	}
@@ -5057,9 +5076,9 @@ void mpp_resp_handler(rpc_msg_t *msgp)
 //	vmk_Scsi_t *s;
 //	uint64_t   r;
 
-	vmk_WarningMessage("%s ==>\n", __func__);
-	rcp = msgp->rcp;
+	cb_stat_exit(&rpc_req_q, 0);
 
+	rcp = msgp->rcp;
 	switch (RPC_GETMSGTYPE(msgp)) {
 		case RPC_READ_MSG:
 //			s = msgp->opaque;
@@ -5076,36 +5095,62 @@ void mpp_resp_handler(rpc_msg_t *msgp)
 		default:
 			assert(0);
 	}
-	vmk_WarningMessage("%s <==\n", __func__);
 }
 
 static VMK_ReturnStatus send_msgs(void *args)
 {
-	rpc_chan_t *rcp = args;
-	uint64_t   i;
-//	vmk_Scsi_t *s;
-	rpc_msg_t  *m;
-	int        rc;
-	char       *p;
-	read_cmd_t *r;
+	const vmk_uint64 MSGS    = 100000;
+	const vmk_uint64 PAYLOAD = 4096;
+	const vmk_uint64 DATASZ  = MSGS * PAYLOAD;
 
-	for (i = 0; i < 10000; i++) {
+	rpc_chan_t  *rcp = args;
+	uint64_t    i;
+	rpc_msg_t   *m;
+	int         rc;
+	char        *p;
+	write_cmd_t *w;
+
+	vmk_TimerCycles stc;
+	vmk_TimerCycles etc;
+	vmk_uint64      secs;
+	vmk_uint64      iops;
+	vmk_uint64      bw;
+	stat_handle_t   h;
+
+	int cond;
+
+	stc = vmk_GetTimerCycles();
+	for (i = 0; i < MSGS; i++) {
 		m = NULL;
-		rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*r), &m);
+		rpc_msg_get(rcp, RPC_WRITE_MSG, sizeof(*w), &m);
 		assert(m != NULL);
-		//m->opaque = s;
 
-		rpc_payload_get(rcp, 4096, &p);
-		rpc_payload_set(rcp, m, p, 4096);
+		rpc_payload_get(rcp, PAYLOAD, &p);
+		assert(p != NULL);
 
+		rpc_payload_set(rcp, m, p, PAYLOAD);
+		assert(m->payload != NULL);
+		assert(m->hdr.payloadlen == PAYLOAD);
+
+		w         = (write_cmd_t *) &m->hdr;
+		w->offset = 0;
+		w->len    = PAYLOAD;
+
+		cb_stat_enter(&rpc_req_fun_stat, &h);
+		cb_stat_enter(&rpc_req_q, NULL);
 		rc = rpc_async_request(rcp, m);
 		assert(rc == 0);
-
-		vmk_WarningMessage("%s: sent msg %lu\n", __func__, i);
+		cb_stat_exit(&rpc_req_fun_stat, h);
 	}
+	etc  = vmk_GetTimerCycles();
+	secs = ((etc - stc) / vmk_TimerCyclesPerSecond()) + 1;
 
-	for (i = 0; i < 100; i++) {
+	iops = MSGS / secs;
+	bw   = DATASZ / secs;
+
+	for (i = 0; i < 10; i++) {
 		vmk_WarningMessage("%s waiting for msgs to complete\n", __func__);
+		vmk_WarningMessage("%s IOPs = %lu, BW = %lu\n", __func__, iops, bw);
 		rc = vmk_WorldWait((vmk_WorldEventID) &cond, VMK_LOCK_INVALID,
 				VMK_MSEC_PER_SEC, "mazhi marji.");
 
@@ -5117,8 +5162,6 @@ static VMK_ReturnStatus send_msgs(void *args)
 			assert(0);
 		}
 	}
-
-	assert(i < 100);
 
 	vmk_WarningMessage("%s closing rpc channel\n", __func__);
 	rpc_chan_close(rcp);
@@ -5139,6 +5182,11 @@ VMK_ReturnStatus rpc_test(void)
 
 	_module_struct_init(&module);
 
+	rc = cb_mpp_stat_sys_init(&module);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
 	rc = client_setup(SIP, strlen(SIP), SPORT, CIP, strlen(CIP), CPORT, &sock);
 	if (rc < 0) {
 		vmk_WarningMessage("client setup failed.\n");
@@ -5146,7 +5194,9 @@ VMK_ReturnStatus rpc_test(void)
 	}
 	sock_initialized = VMK_TRUE;
 
-	rc = rpc_chan_init(&rpc, &module, sock, IODEPTH, 4, sizeof(rpc_maxmsg_t), IODEPTH * 2, mpp_req_handler, mpp_resp_handler);
+	rc = rpc_chan_init(&rpc, &module, sock, IODEPTH * 2, 4,
+		sizeof(rpc_maxmsg_t), IODEPTH * 4, mpp_req_handler,
+		mpp_resp_handler);
 	if (rc < 0) {
 		vmk_WarningMessage("rpc_chan_init failed.\n");
 		goto error;
@@ -5164,6 +5214,7 @@ VMK_ReturnStatus rpc_test(void)
 	assert(rc == 0);
 
 	rpc_chan_deinit(&rpc);
+	cb_mpp_stat_sys_deinit();
 	return VMK_OK;
 
 error:
@@ -5173,6 +5224,7 @@ error:
 	if (sock_initialized == VMK_TRUE) {
 		socket_close(sock);
 	}
+	cb_mpp_stat_sys_deinit();
 	return VMK_FAILURE;
 }
 

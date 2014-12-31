@@ -331,7 +331,7 @@ int rpc_async_request(rpc_chan_t *rcp, rpc_msg_t *msgp)
 		(msgp->payload != NULL && msgp->hdr.payloadlen != 0));
 	assert(msgp->resp == NULL);
 
-	if (!rcp->enabled) {
+	if (VMK_UNLIKELY(!rcp->enabled)) {
 		return -1;
 	}
 
@@ -343,13 +343,13 @@ int rpc_async_request(rpc_chan_t *rcp, rpc_msg_t *msgp)
 	hash_add(&rcp->hash, &msgp->h_entry, b);
 
 	rc = socket_write(rcp->socket, (char *) &msgp->hdr, msgp->hdr.msglen);
-	if (rc != msgp->hdr.msglen) {
+	if (VMK_UNLIKELY(rc != msgp->hdr.msglen)) {
 		goto error;
 	}
 
 	if (msgp->payload) {
 		rc = socket_write(rcp->socket, msgp->payload, msgp->hdr.payloadlen);
-		if (rc != msgp->hdr.payloadlen) {
+		if (VMK_UNLIKELY(rc != msgp->hdr.payloadlen)) {
 			goto error;
 		}
 	}
@@ -455,7 +455,7 @@ void rpc_payload_get(rpc_chan_t *rcp, uint64_t len, char **bufp)
 	assert(bufp != NULL);
 	assert(bufpool_bufsize(&rcp->ploadpool) >= len);
 
-	bufpool_get_zero(&rcp->ploadpool, bufp, 0);
+	bufpool_get_reserve(&rcp->ploadpool, bufp, 0);
 }
 
 void rpc_payload_put(rpc_chan_t *rcp, char *buf)
