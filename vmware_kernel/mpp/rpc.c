@@ -5,6 +5,7 @@
 #include "stats.h"
 
 extern cb_stat_t recv_tp_work_q_stat;
+extern cb_stat_t sock_write_fp_stat;
 
 static inline void dump_rpc_msghdr(rpc_msghdr_t *p)
 {
@@ -285,7 +286,7 @@ int rpc_chan_init(rpc_chan_t *rcp, module_global_t *module,
 	rcp->enabled      = 1;
 	rcp->seqid        = 1;
 
-	rc = thread_pool_init(&rcp->tp, n, module, 4, 128);
+	rc = thread_pool_init(&rcp->tp, n, module, 8, 128);
 	if (rc < 0) {
 		goto error;
 	}
@@ -324,6 +325,7 @@ int rpc_async_request(rpc_chan_t *rcp, rpc_msg_t *msgp)
 {
 	int     b;
 	ssize_t rc;
+	stat_handle_t h;
 
 	assert(rcp  != NULL);
 	assert(msgp != NULL);
@@ -342,13 +344,19 @@ int rpc_async_request(rpc_chan_t *rcp, rpc_msg_t *msgp)
 	RPC_CHAN_LOCK(rcp);
 	hash_add(&rcp->hash, &msgp->h_entry, b);
 
+	cb_stat_enter(&sock_write_fp_stat, &h);
 	rc = socket_write(rcp->socket, (char *) &msgp->hdr, msgp->hdr.msglen);
+	cb_stat_exit(&sock_write_fp_stat, h);
+
 	if (VMK_UNLIKELY(rc != msgp->hdr.msglen)) {
 		goto error;
 	}
 
 	if (msgp->payload) {
+		cb_stat_enter(&sock_write_fp_stat, &h);
 		rc = socket_write(rcp->socket, msgp->payload, msgp->hdr.payloadlen);
+		cb_stat_exit(&sock_write_fp_stat, h);
+
 		if (VMK_UNLIKELY(rc != msgp->hdr.payloadlen)) {
 			goto error;
 		}

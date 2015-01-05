@@ -166,6 +166,8 @@ static cb_stat_t     sg_cp_fun_stat;
 static cb_stat_t     send_tp_work_q_stat;
 static cb_stat_t     scsi_cmd_q;
 cb_stat_t     recv_tp_work_q_stat;
+cb_stat_t     sock_write_fp_stat;
+cb_stat_t     sock_read_fp_stat;
 thread_pool_t        send_tp;
 
 // Forward declarations
@@ -1187,6 +1189,8 @@ static inline VMK_ReturnStatus cb_mpp_stat_sys_init(module_global_t *module)
 
 	cb_stat_init(&stat_sys, &rpc_req_fun_stat, FUN_PROFILE, "req_fu");
 	cb_stat_init(&stat_sys, &sg_cp_fun_stat, FUN_PROFILE, "sg_copy");
+	cb_stat_init(&stat_sys, &sock_write_fp_stat, FUN_PROFILE, "sock_wr");
+	cb_stat_init(&stat_sys, &sock_read_fp_stat, FUN_PROFILE, "sock_rd");
 	cb_stat_init(&stat_sys, &rpc_req_q, QUEUE, "req_q");
 	cb_stat_init(&stat_sys, &send_tp_work_q_stat, QUEUE, "send-w-q");
 	cb_stat_init(&stat_sys, &recv_tp_work_q_stat, QUEUE, "recv-w-q");
@@ -1202,6 +1206,8 @@ static inline void cb_mpp_stat_sys_deinit(void)
 	}
 	cb_stat_deinit(&rpc_req_fun_stat);
 	cb_stat_deinit(&rpc_req_q);
+	cb_stat_deinit(&sock_write_fp_stat);
+	cb_stat_deinit(&sock_read_fp_stat);
 	cb_stat_deinit(&sg_cp_fun_stat);
 	cb_stat_deinit(&send_tp_work_q_stat);
 	cb_stat_deinit(&scsi_cmd_q);
@@ -1920,7 +1926,7 @@ static inline VMK_ReturnStatus init_cachebox(void)
 	 *  - rpc_chan_t must be part of ExampleDevice
 	 */
 
-	rc = thread_pool_init(&send_tp, EXAMPLE_NAME, &module, 4, 1024);
+	rc = thread_pool_init(&send_tp, EXAMPLE_NAME, &module, 8, IODEPTH * 4);
 	if (rc < 0) {
 		goto error;
 	}
@@ -1932,8 +1938,8 @@ static inline VMK_ReturnStatus init_cachebox(void)
 		goto error;
 	}
 
-	rc = rpc_chan_init(rcp, &module, sock, IODEPTH, 4, sizeof(rpc_maxmsg_t),
-			IODEPTH * 2, cb_mpp_req_handler, cb_mpp_resp_handler);
+	rc = rpc_chan_init(rcp, &module, sock, IODEPTH * 4, 32, sizeof(rpc_maxmsg_t),
+			IODEPTH * 8, cb_mpp_req_handler, cb_mpp_resp_handler);
 	if (rc < 0) {
 		vmk_WarningMessage("rpc_chan_init failed.\n");
 		goto error;
@@ -4724,7 +4730,7 @@ init_module(void)
 
    pluginRegistered = VMK_TRUE;
 
-#if 0
+#if 1
 		status = init_cachebox();
 		if (status != VMK_OK) {
 			vmk_WarningMessage("Initializing CacheBox Failed.\n");
@@ -4740,7 +4746,7 @@ init_module(void)
       goto error;
    }
 
-#if 1
+#if 0
    assert(cachebox_initialized == VMK_FALSE);
       /* Test for threapool */
       if (VMK_OK != start_test_thread()) {
@@ -5099,7 +5105,7 @@ void mpp_resp_handler(rpc_msg_t *msgp)
 
 static VMK_ReturnStatus send_msgs(void *args)
 {
-	const vmk_uint64 MSGS    = 100000;
+	const vmk_uint64 MSGS    = 1000000;
 	const vmk_uint64 PAYLOAD = 4096;
 	const vmk_uint64 DATASZ  = MSGS * PAYLOAD;
 
@@ -5194,8 +5200,8 @@ VMK_ReturnStatus rpc_test(void)
 	}
 	sock_initialized = VMK_TRUE;
 
-	rc = rpc_chan_init(&rpc, &module, sock, IODEPTH * 2, 4,
-		sizeof(rpc_maxmsg_t), IODEPTH * 4, mpp_req_handler,
+	rc = rpc_chan_init(&rpc, &module, sock, IODEPTH * 8, 128,
+		sizeof(rpc_maxmsg_t), IODEPTH * 16, mpp_req_handler,
 		mpp_resp_handler);
 	if (rc < 0) {
 		vmk_WarningMessage("rpc_chan_init failed.\n");
@@ -5228,6 +5234,140 @@ error:
 	return VMK_FAILURE;
 }
 
+static VMK_ReturnStatus send_net_msgs(void *args)
+{
+	const vmk_uint64 MSGS    = 10000000;
+	const vmk_uint64 PAYLOAD = 4096;
+	const vmk_uint64 DATASZ  = MSGS * PAYLOAD;
+
+	vmk_Socket      *sock = args;
+	char            *buf;
+	stat_handle_t    h;
+	ssize_t          bc;
+
+	vmk_TimerCycles stc;
+	vmk_TimerCycles etc;
+	vmk_uint64      secs;
+	vmk_uint64      iops;
+	vmk_uint64      bw;
+	int             i;
+	int             rc;
+	int             cond;
+
+	buf = malloc(miscHeap, 4096);
+	assert(buf != NULL);
+
+	stc = vmk_GetTimerCycles();
+	for (i = 0; i < MSGS; i++) {
+		cb_stat_enter(&sock_write_fp_stat, &h);
+		bc = socket_write(*sock, buf, 32);
+		bc = socket_write(*sock, buf, PAYLOAD);
+		cb_stat_exit(&sock_write_fp_stat, h);
+
+		assert(bc == PAYLOAD);
+	}
+	etc  = vmk_GetTimerCycles();
+	secs = ((etc - stc) / vmk_TimerCyclesPerSecond()) + 1;
+
+	iops = MSGS / secs;
+	bw   = DATASZ / secs;
+
+	for (i = 0; i < 5; i++) {
+		vmk_WarningMessage("%s waiting for msgs to complete\n", __func__);
+		vmk_WarningMessage("%s IOPs = %lu, BW = %lu\n", __func__, iops, bw);
+		rc = vmk_WorldWait((vmk_WorldEventID) &cond, VMK_LOCK_INVALID,
+				VMK_MSEC_PER_SEC, "mazhi marji.");
+	}
+
+	free(miscHeap, buf);
+
+	return VMK_OK;
+}
+
+static VMK_ReturnStatus recv_net_msgs(void *args)
+{
+	const vmk_uint64 PAYLOAD = 4096;
+	vmk_Socket       *sock   = args;
+	char             *buf    = NULL;
+	ssize_t          rc;
+	stat_handle_t    h;
+
+	buf = malloc(miscHeap, PAYLOAD);
+	assert(buf != NULL);
+
+	while (1) {
+		cb_stat_enter(&sock_read_fp_stat, &h);
+		rc = socket_read(*sock, buf, 32);
+		if (rc != 32) {
+			cb_stat_exit(&sock_read_fp_stat, h);
+			break;
+		}
+
+		rc = socket_read(*sock, buf, PAYLOAD);
+		cb_stat_exit(&sock_read_fp_stat, h);
+		if (rc != PAYLOAD) {
+			break;
+		}
+	}
+
+	free(miscHeap, buf);
+	return VMK_OK;
+}
+
+VMK_ReturnStatus network_test(void)
+{
+	module_global_t module;
+	int             rc;
+	vmk_Socket      sock;
+	pthread_t       s_thread;
+	pthread_t       r_thread;
+
+	vmk_Bool         sock_init = VMK_FALSE;
+	VMK_ReturnStatus s         = VMK_FAILURE;
+
+	_module_struct_init(&module);
+
+	rc  = cb_mpp_stat_sys_init(&module);
+	if (rc < 0) {
+		return VMK_FAILURE;
+	}
+
+	rc = client_setup(SIP, strlen(SIP), SPORT, CIP, strlen(CIP), CPORT, &sock);
+	if (rc < 0) {
+		vmk_WarningMessage("client setup failed.\n");
+		goto error;
+	}
+	sock_init = VMK_TRUE;
+
+	rc = pthread_create(&s_thread, module.module, &module, send_net_msgs, &sock);
+	if (rc < 0) {
+		vmk_WarningMessage("pthread_create failed.\n");
+		goto error;
+	}
+
+	rc = pthread_create(&r_thread, module.module, &module, recv_net_msgs, &sock);
+	if (rc < 0) {
+		vmk_WarningMessage("pthread_create failed.\n");
+		pthread_cancel(s_thread);
+		goto error;
+	}
+
+	rc = pthread_join(s_thread, NULL);
+	assert(rc == 0);
+
+	rc = pthread_cancel(r_thread);
+	assert(rc == 0);
+
+	s = VMK_OK;
+error:
+	if (sock_init) {
+		socket_close(sock);
+	}
+
+	cb_mpp_stat_sys_deinit();
+	return s;
+}
+
 VMK_ReturnStatus run_tests(void *data)
 {
 	VMK_ReturnStatus rc;
@@ -5255,6 +5395,14 @@ VMK_ReturnStatus run_tests(void *data)
 		goto error;
 	}
 	vmk_WarningMessage("ThreadPool test: PASSED.\n");
+
+	vmk_WarningMessage("Running Network test.\n");
+	rc = network_test();
+	if (rc != VMK_OK) {
+		vmk_WarningMessage("Network Test: FAILED\n");
+		goto error;
+	}
+	vmk_WarningMessage("Network Test: PASSED\n");
 #endif
 
 	vmk_WarningMessage("Running RPC test.\n");
