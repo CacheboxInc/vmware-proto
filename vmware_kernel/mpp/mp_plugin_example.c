@@ -1340,7 +1340,6 @@ static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	vmk_uint32       blocks;
 	uint64_t         len;
 	rpc_msg_t        *m;
-	vmk_ByteCount    bc;
 	read_cmd_t       *r;
 	int              rc;
 	stat_handle_t    h;
@@ -1356,7 +1355,6 @@ static VMK_ReturnStatus read_cmd(ExampleCommand *ex_cmd, rpc_chan_t *rcp)
 	rpc_msg_get(rcp, RPC_READ_MSG, sizeof(*r), &m);
 	assert(m != NULL);
 
-	bc        = vmk_SgGetDataLen(cmd->sgArray);
 	m->opaque = ex_cmd;
 	r         = (read_cmd_t *) &m->hdr;
 	r->offset = offset;
@@ -4854,7 +4852,7 @@ cleanup_module(void)
 
    VMK_ASSERT(vmk_ListIsEmpty(&retryQueue));
 
-//   deinit_cachebox();
+   deinit_cachebox();
 
    for (i = 0; i < maxDevices; i++) {
       VMK_ASSERT(createdDevices[i] == NULL);

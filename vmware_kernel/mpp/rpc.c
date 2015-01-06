@@ -420,18 +420,23 @@ void rpc_msg_get(rpc_chan_t *rcp, int msgtype, size_t msglen, rpc_msg_t **msgpp)
 	assert(msgpp != NULL);
 
 	rm = NULL;
-	bufpool_get_zero(&rcp->msgpool, (char **) &rm, 0);
+	bufpool_get(&rcp->msgpool, (char **) &rm, 0);
 	assert(rm != NULL);
 
 	hash_entry_init(&rm->h_entry);
-	rm->rcp = rcp;
+	rm->payload = NULL;
+	rm->resp    = NULL;
+	rm->rcp     = rcp;
+	rm->opaque  = NULL;
 
-	RPC_SETMSGTYPE(rm, msgtype);
 	rm->hdr.seqid      = vmk_AtomicReadAdd64(&rcp->seqid, 1);
+	rm->hdr.type       = 0;
 	rm->hdr.msglen     = msglen;
 	rm->hdr.payloadlen = 0;
+	rm->hdr.status     = 0;
+	RPC_SETMSGTYPE(rm, msgtype);
 
-	*msgpp = rm;
+	*msgpp             = rm;
 }
 
 void rpc_msg_put(rpc_chan_t *rcp, rpc_msg_t *msgp)

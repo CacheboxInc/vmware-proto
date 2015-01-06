@@ -181,6 +181,7 @@ work_t *new_work(thread_pool_t *tp)
 	rc = bufpool_get(&tp->pool, (char **) &w, 0);
 	assert(rc == 0 && w != NULL);
 
+	DLL_INIT(&w->list);
 	return w;
 }
 

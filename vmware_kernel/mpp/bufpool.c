@@ -138,7 +138,8 @@ void bufpool_deinit(bufpool_t *bp)
  * Otherwise sleep for one
  * returns 0 on success, -1 if buffer not found and noblock true
  */
-int _bufpool_get(bufpool_t *bp, char **bufp, int noblock, int alloc_reserve)
+static int _bufpool_get(bufpool_t *bp, char **bufp, int noblock,
+		int alloc_reserve)
 {
 	int      rc;
 	dll_t    *dllp;
